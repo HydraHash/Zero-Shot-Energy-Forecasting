@@ -1,0 +1,17 @@
+annotated-types==0.8.0
+colorama==0.4.6
+gluonts==0.17.0
+packaging==26.3
+pandas==2.3.3
+pydantic==2.13.4
+pydantic_core==2.46.4
+python-dateutil==2.9.0.post0
+pytz==2026.3.post1
+setuptools==84.0.0
+six==1.17.0
+toolz==0.12.1
+tqdm==4.70.0
+typing-inspection==0.4.4
+typing_extensions==4.16.0
+tzdata==2026.3
+wheel==0.48.0
