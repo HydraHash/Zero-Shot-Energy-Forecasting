@@ -15,9 +15,9 @@ from system_data_psutil import ResourceProfiler
 torch.set_float32_matmul_precision("high")
 torch.set_num_threads(20)
 
-OUTPUT_BASE_DIR = Path("./small_moment_prediction_output")
+OUTPUT_BASE_DIR = Path("./smallc3_moment_prediction_output")
 
-logging.basicConfig(filename="moment_log.txt",
+logging.basicConfig(filename="smallc3_moment_log.txt",
                     filemode='a',
                     format='%(asctime)s,%(msecs)03d %(name)s %(levelname)s %(message)s',
                     datefmt='%Y-%m-%d %H:%M:%S',
@@ -26,7 +26,8 @@ logging.basicConfig(filename="moment_log.txt",
 EXPERIMENTAL_COMBINATIONS = {
     # MOMENT operates on a fixed 512-step window. Ensure Lag + Horizon <= 512.
     1: {"lag_days": 1, "horizon_days": 1, "step_days": 1},
-    2: {"lag_days": 7, "horizon_days": 7, "step_days": 7}, 
+    2: {"lag_days": 7, "horizon_days": 7, "step_days": 7},
+    3: {"lag_days": 7, "horizon_days": 1, "step_days": 1}, 
 }
 
 # =====================================================================
@@ -180,9 +181,6 @@ if __name__ == "__main__":
     
     logging.info(f"HARDWARE DETECTED: {device_str.upper()}")
     
-    # -------------------------------------------------------------
-    # MODEL INITIALIZATION (MOMENT)
-    # -------------------------------------------------------------
     logging.info("Loading MOMENT-1-small from Hugging Face...")
     
     moment_model = MOMENTPipeline.from_pretrained("AutonLab/MOMENT-1-small", model_kwargs={'task_name': 'reconstruction',})
