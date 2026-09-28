@@ -12,19 +12,17 @@ from system_data_psutil import ResourceProfiler
 torch.set_float32_matmul_precision("high")
 torch.set_num_threads(20)
 
-OUTPUT_BASE_DIR = Path("./smallc3_kairos50m_prediction_output")
+EXPERIMENTAL_COMBINATIONS = {
+    1: {"lag_days": 1, "horizon_days": 1, "step_days": 1},
+    2: {"lag_days": 7, "horizon_days": 7, "step_days": 7},
+    3: {"lag_days": 7, "horizon_days": 1, "step_days": 1},
+}
 
-logging.basicConfig(filename="smallc3_kairos50m_log.txt",
+logging.basicConfig(filename=f"test_small_Kairos_log.txt",
                     filemode='a',
                     format='%(asctime)s,%(msecs)03d %(name)s %(levelname)s %(message)s',
                     datefmt='%Y-%m-%d %H:%M:%S',
                     level=logging.INFO)
-
-EXPERIMENTAL_COMBINATIONS = {
-    #1: {"lag_days": 1, "horizon_days": 1, "step_days": 1},
-    #2: {"lag_days": 7, "horizon_days": 7, "step_days": 7},
-    3: {"lag_days": 7, "horizon_days": 1, "step_days": 1},
-}
 
 # =====================================================================
 # 1. Kairos Zero-Shot Pipeline
@@ -128,33 +126,17 @@ def load_vea_profiles(file_path) -> pd.DataFrame:
     return df_t
 
 
-# =====================================================================
-# 3. Main Execution Block
-# =====================================================================
-if __name__ == "__main__":
-    DATA_PATH = r"C:\Users\lsb-ps\Documents\VEA_Playground\zero_shot_data\08_zero_shot_output\load_profiles_enriched_small.tsv"
-    
-    loaded_profiles_df = load_vea_profiles(file_path=DATA_PATH)
-    BATCH_SIZE = 268
+def run_modelsize(model_name, data_path, batch_size, loaded_profiles_df):
+    OUTPUT_BASE_DIR = Path(f"./test_{model_name}_prediction_output")
     company_ids = loaded_profiles_df.columns
-    
     device_str = "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device_str)
     
     logging.info(f"HARDWARE DETECTED: {device_str.upper()}")
-    logging.info("Loading Kairos_50m from Hugging Face...")
+    logging.info(f"Loading {model_name} from Hugging Face...")
     
-    kairos_model = AutoModel.from_pretrained("mldi-lab/Kairos_50m", trust_remote_code=True).to(device)
+    kairos_model = AutoModel.from_pretrained(f"mldi-lab/{model_name}", trust_remote_code=True).to(device)
     kairos_model.eval()
-    
-    # Apply PyTorch JIT Compilation if supported
-    #logging.info(f"Applying torch.compile optimization for {device_str.upper()}...")
-    #try:
-    #    kairos_model = torch.compile(kairos_model)
-    #except Exception as e:
-    #    logging.info(f" -> [Warning] Could not apply torch.compile: {e}")
-            
-    # -------------------------------------------------------------
 
     logging.info(f"Starting evaluation loop across {len(EXPERIMENTAL_COMBINATIONS)} configurations...")
     
@@ -167,9 +149,9 @@ if __name__ == "__main__":
         
         logging.info(f"\n -> Processing {combo_dir_name}...")
         
-        with ResourceProfiler(run_name=combo_dir_name, input_file_path=DATA_PATH, output_dir_path=combo_output_path):
-            for i in range(0, len(company_ids), BATCH_SIZE):
-                batch_cols = company_ids[i : i + BATCH_SIZE]
+        with ResourceProfiler(run_name=combo_dir_name, input_file_path=data_path, output_dir_path=combo_output_path):
+            for i in range(0, len(company_ids), batch_size):
+                batch_cols = company_ids[i : i + batch_size]
                 batch_df = loaded_profiles_df[batch_cols]
                 logging.info(f"    Running Batch {i} to {i + len(batch_cols)}...")
                 
@@ -186,3 +168,21 @@ if __name__ == "__main__":
                 del results
                 
     logging.info(f"\nExecution loop complete. Results saved to: '{OUTPUT_BASE_DIR.absolute()}'")
+
+
+# =====================================================================
+# 3. Main Execution Block
+# =====================================================================
+if __name__ == "__main__":
+    DATA_PATH = r"C:\Users\lsb-ps\Documents\VEA_Playground\zero_shot_data\08_zero_shot_output\load_profiles_enriched_very_small.tsv"
+    BATCH_SIZE = 268
+    
+    loaded_profiles_df = load_vea_profiles(file_path=DATA_PATH)
+
+    run_modelsize("Kairos_10m", DATA_PATH, BATCH_SIZE, loaded_profiles_df)
+    logging.info("----------------------------------------------------------------------------------------------------------------------------------")
+
+    run_modelsize("Kairos_23m", DATA_PATH, BATCH_SIZE, loaded_profiles_df)
+    logging.info("----------------------------------------------------------------------------------------------------------------------------------")
+
+    run_modelsize("Kairos_50m", DATA_PATH, BATCH_SIZE, loaded_profiles_df)
