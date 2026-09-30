@@ -13,9 +13,9 @@ from system_data_psutil import ResourceProfiler
 # =====================================================================
 # 1. Parameter Configuration Matrix
 # =====================================================================
-OUTPUT_BASE_DIR = Path("./cnn_prediction_output")
+OUTPUT_BASE_DIR = Path("./test_cnn_prediction_output")
 
-logging.basicConfig(filename="cnn_log.txt",
+logging.basicConfig(filename="test_cnn_log.txt",
                     filemode='a',
                     format='%(asctime)s,%(msecs)03d %(name)s %(levelname)s %(message)s',
                     datefmt='%Y-%m-%d %H:%M:%S',
@@ -24,12 +24,11 @@ logging.basicConfig(filename="cnn_log.txt",
 EXPERIMENTAL_COMBINATIONS = {
     1: {"train_split_days": 30, "lag_days": 1, "horizon_days": 1, "step_days": 1},
     2: {"train_split_days": 30,  "lag_days": 7, "horizon_days": 7, "step_days": 7},
+    3: {"train_split_days": 30,  "lag_days": 7, "horizon_days": 1, "step_days": 1},
+
 }
 
-
-# =====================================================================
-# 2. Original CNN Code
-# =====================================================================
+# Google CNN Code
 class CNNModel(tf.keras.Model):
     def __init__(self, n_channel, pred_len, kernel_size):
         super().__init__()
@@ -55,27 +54,12 @@ def create_lag_features(series_values, lag_steps, horizon_steps):
     return np.array(X), np.array(y)
 
 
-# =====================================================================
-# 3. Training Pipeline for single training, rolling inference
-# =====================================================================
-def run_cnn_pipeline(batch_df, config):
-    train_split_steps = config["train_split_days"] * 96
-    lag_steps = config["lag_days"] * 96
-    horizon_steps = config["horizon_days"] * 96
-    s_steps = config["step_days"] * 96
-    
-    total_steps = len(batch_df)
-    strategy_data = {"google_cnn": []}
-    
-    # ---------------------------------------------------------
-    # PHASE 1: Build the Global Training Dataset
-    # ---------------------------------------------------------
-    # Extract only the chronological training block
-    train_df = batch_df.iloc[:train_split_steps]
-    
+
+
+def train_cnn(uci_df: pd.DataFrame, lag_steps: int, horizon_steps: int):
     global_X_train, global_y_train = [], []
-    for company_id in batch_df.columns:
-        series_vals = train_df[company_id].values.ravel()
+    for company_id in uci_df.columns:
+        series_vals = uci_df[company_id].values.ravel()
         X_train, y_train = create_lag_features(series_vals, lag_steps, horizon_steps)
         global_X_train.append(X_train)
         global_y_train.append(y_train)
@@ -92,17 +76,21 @@ def run_cnn_pipeline(batch_df, config):
     model = CNNModel(n_channel=1, pred_len=horizon_steps, kernel_size=3)
     model.compile(optimizer='adam', loss='mse')
     
-    logging.info(f"      -> Phase 1: Training Global CNN on first {config['train_split_days']} days...")
+    logging.info(f"Training Global CNN on UCI Dataset")
+    model.fit(X_train_matrix, y_train_matrix, epochs=3, batch_size=128, verbose=0)  #from 264 due to memory error
+
+    return model
+
+
+def run_zs_interference(vea_df: pd.DataFrame, config: dict, pretrained_model):
+    lag_steps = config["lag_days"] * 96
+    horizon_steps = config["horizon_days"] * 96
+    s_steps = config["step_days"] * 96
+    total_steps = len(vea_df)
     
-    model.fit(X_train_matrix, y_train_matrix, epochs=10, batch_size=64, verbose=0)  #from 264 due to memory error
+    strategy_data = {"CNNOutDom": []}
     
-    logging.info(f"      -> Phase 2: Generating rolling predictions for the remaining days...")
-    
-    # Set the sliding window to start exactly where the training data ends.
-    # We step back by `lag_steps` to grab the historical features needed to predict the first horizon.
-    eval_start_idx = train_split_steps - lag_steps
-    
-    for start_idx in range(eval_start_idx, total_steps - lag_steps - horizon_steps + 1, s_steps):
+    for start_idx in range(0, total_steps - lag_steps - horizon_steps + 1, s_steps):
         origin_idx = start_idx + lag_steps
         end_idx = origin_idx + horizon_steps
         
@@ -110,16 +98,12 @@ def run_cnn_pipeline(batch_df, config):
         horizon_end_dt = batch_df.index[end_idx - 1]
         target_weekday_name = horizon_start_dt.strftime("%A")
         
-        # 1. Slice the features and the ground truth
-        lag_block = batch_df.iloc[start_idx:origin_idx]
-        actual_block = batch_df.iloc[origin_idx:end_idx]
-        
-        # 2. Extract features for all 500 companies simultaneously
-        X_test_batch = np.array([lag_block[cid].values.ravel() for cid in batch_df.columns])
+        lag_block = vea_df.iloc[start_idx:origin_idx]
+        actual_block = vea_df.iloc[origin_idx:end_idx]
+        X_test_batch = np.array([lag_block[cid].values.ravel() for cid in vea_df.columns])
         X_test_batch = np.expand_dims(X_test_batch, axis=-1) # Shape: [500, lag_steps, 1]
         
-        # 3. Model Inference: Predict the entire 500-plant batch in one pass!
-        preds = model.predict(X_test_batch, verbose=0) # Shape: [500, horizon_steps, 1]
+        preds = pretrained_model.predict(X_test_batch, verbose=0) # Shape: [500, horizon_steps, 1]
         preds = preds.squeeze(axis=-1)                 # Shape: [500, horizon_steps]
         
         # 4. Map the predictions back to the Parquet/TSV format
@@ -136,14 +120,26 @@ def run_cnn_pipeline(batch_df, config):
                 "actual_values": y_actual_slice.tolist(),
                 "predicted_values": pred_cnn.tolist()
             }
-            strategy_data["google_cnn"].append(row_cnn)
+            strategy_data["CNNOutDom"].append(row_cnn)
             
     return strategy_data
 
 
-# =====================================================================
-# 4. Vectorized Data Loader
-# =====================================================================
+def load_train_dataset(file_path, max_clients: int = 50, months: int = 4) -> pd.DataFrame:
+    logging.info("Loading UCI Electricity Dataset for Training...")
+
+    load_cols = [0] + list(range(1, max_clients + 1))
+    
+    df = pd.read_csv(file_path, sep=';', decimal=',', index_col=0, parse_dates=True, usecols=load_cols)
+    df = df.astype(np.float32)
+    load_rows = months * 30 * 96
+    df = df.tail(load_rows)
+    df = df.resample('15min').ffill().fillna(0)
+    
+    logging.info(f"UCI Dataset loaded: {df.shape[1]} clients, {df.shape[0]} timestamps.")
+    return df
+
+
 def load_vea_profiles(file_path) -> pd.DataFrame:
     file_path = Path(file_path)
     if file_path.suffix.lower() == '.pkl':
@@ -187,14 +183,13 @@ def load_vea_profiles(file_path) -> pd.DataFrame:
     return df_t
 
 
-# =====================================================================
-# 5. Main Execution Block
-# =====================================================================
 if __name__ == "__main__":
-    DATA_PATH = r"C:\Users\lsb-ps\Documents\VEA_Playground\zero_shot_data\08_zero_shot_output\load_profiles_enriched.tsv"
-    
+    DATA_PATH = r"C:\Users\lsb-ps\Documents\VEA_Playground\zero_shot_data\08_zero_shot_output\load_profiles_enriched_very_small.tsv"
+    TRAIN_DATA_PATH = r"C:\Users\lsb-ps\Documents\electricityloaddiagrams20112014\LD2011_2014.txt"
+
     loaded_profiles_df = load_vea_profiles(file_path=DATA_PATH)
-    BATCH_SIZE = 500
+    train_profiles_df = load_train_dataset(TRAIN_DATA_PATH)
+    BATCH_SIZE = 268
     company_ids = loaded_profiles_df.columns
     
     logging.info(f"\nStarting evaluation loop across {len(EXPERIMENTAL_COMBINATIONS)} configurations...")
@@ -203,10 +198,12 @@ if __name__ == "__main__":
         combo_dir_name = f"c{combo_id}_lag{config['lag_days']}_horizon{config['horizon_days']}_step{config['step_days']}"
         combo_output_path = OUTPUT_BASE_DIR / combo_dir_name
         
-        cnn_dir = combo_output_path / "google_cnn"
+        cnn_dir = combo_output_path / "CNNOutDom"
         cnn_dir.mkdir(parents=True, exist_ok=True)
         
         logging.info(f"\n -> Processing {combo_dir_name}...")
+
+        trained_cnn = train_cnn(train_profiles_df, config["lag_days"] * 96, config["horizon_days"] * 96)
         
         with ResourceProfiler(run_name=combo_dir_name, input_file_path=DATA_PATH, output_dir_path=combo_output_path):
             for i in range(0, len(company_ids), BATCH_SIZE):
@@ -214,11 +211,11 @@ if __name__ == "__main__":
                 batch_df = loaded_profiles_df[batch_cols]
                 logging.info(f"    Running Batch {i} to {i + len(batch_cols)}...")
                 
-                results = run_cnn_pipeline(batch_df, config)
+                results = run_zs_interference(batch_df, config, trained_cnn)
                 
-                if results["google_cnn"]:
-                    df_cnn = pd.DataFrame(results["google_cnn"])
-                    df_cnn.to_parquet(cnn_dir / f"batch_{i}.parquet", index=False, compression="snappy")
+                if results["CNNOutDom"]:
+                    df_cnn = pd.DataFrame(results["CNNOutDom"])
+                    df_cnn.to_parquet(cnn_dir / f"batch_{i}.parquet", index=False, compression="snappy", engine="pyarrow")
 
                     if i == 0:
                         tsv_path = cnn_dir / f"batch_{i}_.tsv"
