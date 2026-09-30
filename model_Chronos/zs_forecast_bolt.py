@@ -14,14 +14,10 @@ from system_data_psutil import ResourceProfiler
 
 # Optimize float32 matrix operations
 torch.set_float32_matmul_precision("high")
-torch.set_num_threads(20)
+torch.set_num_threads(48)
 
-# =====================================================================
-# 1. Parameter Configuration Matrix
-# =====================================================================
-OUTPUT_BASE_DIR = Path("./smallc3_bolt43M_prediction_output")
 
-logging.basicConfig(filename="smallc3_bolt43M_chronos_log.txt",
+logging.basicConfig(filename="triplec3_chronosBolt_log.txt",
                     filemode='a',
                     format='%(asctime)s,%(msecs)03d %(name)s %(levelname)s %(message)s',
                     datefmt='%Y-%m-%d %H:%M:%S',
@@ -34,16 +30,13 @@ EXPERIMENTAL_COMBINATIONS = {
 }
 
 
-# =====================================================================
-# 2b. Dedicated Chronos-Bolt Pipeline (2D Tensors)
-# =====================================================================
-def run_chronos_bolt_pipeline(batch_df, config, model):
+def run_chronos_bolt_pipeline(batch_df, config, model, model_name):
     lag_steps = config["lag_days"] * 96
     horizon_steps = config["horizon_days"] * 96
     s_steps = config["step_days"] * 96
     total_steps = len(batch_df)
     
-    strategy_data = {"Bolt9m": []}
+    strategy_data = {f"{model_name}": []}
     CHUNK_SIZE = 48 
     
     for start_idx in range(0, total_steps - lag_steps - horizon_steps + 1, s_steps):
@@ -99,14 +92,56 @@ def run_chronos_bolt_pipeline(batch_df, config, model):
                 "actual_values": actual_block[company_id].values.ravel().tolist(),
                 "predicted_values": point_forecast[i].tolist()
             }
-            strategy_data["Bolt9m"].append(row)
+            strategy_data[f"{model_name}"].append(row)
             
     return strategy_data
 
 
-# =====================================================================
-# 3. Vectorized Data Loader
-# =====================================================================
+def run_modelsize(model_name, data_path, batch_size, loaded_profiles_df):
+    OUTPUT_BASE_DIR = Path(f"./triplec3_{model_name}_prediction_output")
+    company_ids = loaded_profiles_df.columns
+    device_map = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    logging.info(f"\nStarting evaluation loop across {len(EXPERIMENTAL_COMBINATIONS)} configurations...")
+    
+    for combo_id, config in EXPERIMENTAL_COMBINATIONS.items():
+        combo_dir_name = f"c{combo_id}_lag{config['lag_days']}_horizon{config['horizon_days']}_step{config['step_days']}"
+        combo_output_path = OUTPUT_BASE_DIR / combo_dir_name
+        
+        bolt_dir = combo_output_path / f"{model_name}"
+        bolt_dir.mkdir(parents=True, exist_ok=True)
+        
+        logging.info(f"\n -> Processing {combo_dir_name}...")
+        
+        with ResourceProfiler(run_name=combo_dir_name, input_file_path=data_path, output_dir_path=combo_output_path):
+
+            logging.info(f"\nLoading Chronos-{model_name} Checkpoint...")
+            if "21" in model_name: hf_name = "mini"
+            elif "43" in model_name: hf_name = "small"
+            else: hf_name = "tiny"
+            logging.info(f"Running Model chronos-bolt-{hf_name} now")
+            chronos_bolt = ChronosBoltPipeline.from_pretrained(f"amazon/chronos-bolt-{hf_name}", device_map=device_map, dtype=torch.bfloat16)
+            
+            for i in range(0, len(company_ids), batch_size):
+                batch_cols = company_ids[i : i + batch_size]
+                batch_df = loaded_profiles_df[batch_cols]
+                logging.info(f"    [Chronos-Bolt] Running Batch {i} to {i + len(batch_cols)}...")
+                
+                results = run_chronos_bolt_pipeline(batch_df, config, chronos_bolt, model_name)
+                
+                if results[f"{model_name}"]:
+                    df_c2 = pd.DataFrame(results[f"{model_name}"])
+                    df_c2.to_parquet(bolt_dir / f"batch_{i}.parquet", index=False, compression="snappy", engine="pyarrow")
+                    if i == 0:
+                        df_c2.to_csv(bolt_dir / f"batch_{i}_.tsv", sep="\t", index=False)
+                    del df_c2
+                del results
+                
+            del chronos_bolt
+                
+    logging.info(f"\nExecution loop complete. Results saved to: '{OUTPUT_BASE_DIR.absolute()}'")
+
+
 def load_vea_profiles(file_path) -> pd.DataFrame:
     file_path = Path(file_path)
     if file_path.suffix.lower() == '.pkl':
@@ -144,48 +179,17 @@ def load_vea_profiles(file_path) -> pd.DataFrame:
     return df_t
 
 
-# =====================================================================
-# 4. Main Execution Block
-# =====================================================================
 if __name__ == "__main__":
-    DATA_PATH = r"C:\Users\lsb-ps\Documents\VEA_Playground\zero_shot_data\08_zero_shot_output\load_profiles_enriched_small.tsv"
-    
-    loaded_profiles_df = load_vea_profiles(file_path=DATA_PATH)
-    BATCH_SIZE = 268
-    company_ids = loaded_profiles_df.columns
-    device_map = "cuda" if torch.cuda.is_available() else "cpu"
-    
-    logging.info(f"\nStarting evaluation loop across {len(EXPERIMENTAL_COMBINATIONS)} configurations...")
-    
-    for combo_id, config in EXPERIMENTAL_COMBINATIONS.items():
-        combo_dir_name = f"c{combo_id}_lag{config['lag_days']}_horizon{config['horizon_days']}_step{config['step_days']}"
-        combo_output_path = OUTPUT_BASE_DIR / combo_dir_name
-        
-        bolt_dir = combo_output_path / "Bolt9m"
-        bolt_dir.mkdir(parents=True, exist_ok=True)
-        
-        logging.info(f"\n -> Processing {combo_dir_name}...")
-        
-        with ResourceProfiler(run_name=combo_dir_name, input_file_path=DATA_PATH, output_dir_path=combo_output_path):
+    DATA_PATH = r"C:\Users\lsb-ps\Documents\VEA_Playground\zero_shot_data\08_zero_shot_output\load_profiles_enriched.tsv"
+    BATCH_SIZE = 500
 
-            logging.info("\nLoading Chronos-Bolt Small (43M) Checkpoint...")
-            chronos_bolt = ChronosBoltPipeline.from_pretrained("amazon/chronos-bolt-small", device_map=device_map, dtype=torch.bfloat16)
-            
-            for i in range(0, len(company_ids), BATCH_SIZE):
-                batch_cols = company_ids[i : i + BATCH_SIZE]
-                batch_df = loaded_profiles_df[batch_cols]
-                logging.info(f"    [Chronos-Bolt] Running Batch {i} to {i + len(batch_cols)}...")
-                
-                results = run_chronos_bolt_pipeline(batch_df, config, chronos_bolt)
-                
-                if results["Bolt9m"]:
-                    df_c2 = pd.DataFrame(results["Bolt9m"])
-                    df_c2.to_parquet(bolt_dir / f"batch_{i}.parquet", index=False, compression="snappy", engine="pyarrow")
-                    if i == 0:
-                        df_c2.to_csv(bolt_dir / f"batch_{i}_.tsv", sep="\t", index=False)
-                    del df_c2
-                del results
-                
-            del chronos_bolt
-                
-    logging.info(f"\nExecution loop complete. Results saved to: '{OUTPUT_BASE_DIR.absolute()}'")
+    loaded_profiles_df = load_vea_profiles(file_path=DATA_PATH)
+
+    run_modelsize("Bolt9m", DATA_PATH, BATCH_SIZE, loaded_profiles_df)
+    logging.info("----------------------------------------------------------------------------------------------------------------------------------")
+
+    run_modelsize("Bolt21m", DATA_PATH, BATCH_SIZE, loaded_profiles_df)
+    logging.info("----------------------------------------------------------------------------------------------------------------------------------")
+
+    run_modelsize("Bolt43m", DATA_PATH, BATCH_SIZE, loaded_profiles_df)
+    logging.info("----------------------------------------------------------------------------------------------------------------------------------")
