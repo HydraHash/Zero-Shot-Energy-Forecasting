@@ -71,11 +71,7 @@ def process_and_export_batches(base_output_dir: str | Path):
         
     print(f"Found {len(batch_groups)} unique model/combination folders to process.")
 
-    # Iteratively process each folder
     for parquet_dir, files in batch_groups.items():
-        print(f"Processing {len(files)} files in {parquet_dir}")
-        
-        # Extract metadata from the directory tree
         # size_folder / combination_folder / model_folder / batch.parquet
         model_name = parquet_dir.name
         combo_name = parquet_dir.parent.name
@@ -83,7 +79,15 @@ def process_and_export_batches(base_output_dir: str | Path):
         
         size = "small" if "small" in size_folder_name.lower() else "normal"
         combo_prefix = combo_name.split("_")[0]
-        
+
+        # Check if file already exists
+        output_filename = f"metrics_{model_name}_{size}_{combo_prefix}.tsv"
+        out_path = parquet_dir.parent.parent / output_filename
+        if out_path.exists():
+            print(f"Skipping {model_name} {combo_prefix} - {output_filename} already exists.")
+            continue
+
+        print(f"Processing {len(files)} files in {parquet_dir}")    
         # Load and stitch batches for this specific iteration
         all_batches = []
         for file_path in files:
@@ -114,5 +118,5 @@ def process_and_export_batches(base_output_dir: str | Path):
         gc.collect()
 
 if __name__ == "__main__":
-    PREDICTION_DIR = r"C:\Users\lsb-ps\Documents\predictions_overview_lean\1_TSMixer"
+    PREDICTION_DIR = r"C:\Users\lsb-ps\Documents\predictions_overview_lean\test"
     process_and_export_batches(PREDICTION_DIR)
