@@ -7,46 +7,40 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.quantization
-import timesfm
 import logging
+import timesfm
 from pathlib import Path
 from system_data_psutil import ResourceProfiler
 
 # Optimize float32 matrix operations
 torch.set_float32_matmul_precision("high")
+torch.set_num_threads(20)
 
-logging.basicConfig(filename="small_timesfm_log.txt",
+OUTPUT_BASE_DIR = Path("./verysmall_timesfm3_prediction_output")
+
+logging.basicConfig(filename="verysmall_timesfm3_log.txt",
                     filemode='a',
                     format='%(asctime)s,%(msecs)03d %(name)s %(levelname)s %(message)s',
                     datefmt='%Y-%m-%d %H:%M:%S',
                     level=logging.INFO)
 
-# =====================================================================
-# 1. Parameter Configuration Matrix
-# =====================================================================
-OUTPUT_BASE_DIR = Path("./small_prediction_output")
 
 EXPERIMENTAL_COMBINATIONS = {
-    # Zero-Shot evaluation: Look back, forecast 1 or 7 days ahead
     1: {"lag_days": 1, "horizon_days": 1, "step_days": 1},
     2: {"lag_days": 7, "horizon_days": 7, "step_days": 7},
+    3: {"lag_days": 7, "horizon_days": 1, "step_days": 7},
 }
 
-# =====================================================================
-# 2. TimesFM Zero-Shot Pipeline
-# =====================================================================
 def run_timesfm_pipeline(batch_df, config, model):
     lag_steps = config["lag_days"] * 96
     horizon_steps = config["horizon_days"] * 96
     s_steps = config["step_days"] * 96
     
     total_steps = len(batch_df)
-    strategy_data = {"google_timesfm": []}
+    strategy_data = {"TimesFM": []}
     
     # Start sliding window once we have enough context (lag_steps)
     for start_idx in range(0, total_steps - lag_steps - horizon_steps + 1, s_steps):
-        if start_idx % 50 == 0:
-            logging.info(f"Processing Batch No. {start_idx}...")
         origin_idx = start_idx + lag_steps
         end_idx = origin_idx + horizon_steps
         
@@ -61,16 +55,14 @@ def run_timesfm_pipeline(batch_df, config, model):
         # 2. Extract inputs as a list of 1D numpy arrays for all 500 companies in batch
         inputs_list = [lag_block[cid].values.ravel() for cid in batch_df.columns]
 
-        # 3. TimesFM Zero-Shot Forecast
-        point_forecast, _ = model.forecast(
-            horizon=horizon_steps,
-            inputs=inputs_list
-        )
+        batch_outputs = list(model.predict_batch(inputs_list, horizon=horizon_steps))
 
         # 4. Map predictions back to the unified Parquet/TSV format
         for i, company_id in enumerate(batch_df.columns):
             y_actual_slice = actual_block[company_id].values.ravel()
-            pred_timesfm = point_forecast[i]
+            
+            # Extract the point forecast attribute from the output object
+            pred_timesfm = batch_outputs[i].forecast
             
             row_timesfm = {
                 "id": company_id,
@@ -81,14 +73,11 @@ def run_timesfm_pipeline(batch_df, config, model):
                 "actual_values": y_actual_slice.tolist(),
                 "predicted_values": pred_timesfm.tolist()
             }
-            strategy_data["google_timesfm"].append(row_timesfm)
+            strategy_data["TimesFM"].append(row_timesfm)
             
     return strategy_data
 
 
-# =====================================================================
-# 3. Vectorized Data Loader
-# =====================================================================
 def load_vea_profiles(file_path) -> pd.DataFrame:
     file_path = Path(file_path)
     if file_path.suffix.lower() == '.pkl':
@@ -126,11 +115,8 @@ def load_vea_profiles(file_path) -> pd.DataFrame:
     return df_t
 
 
-# =====================================================================
-# 4. Main Execution Block
-# =====================================================================
 if __name__ == "__main__":
-    DATA_PATH = r"C:\Users\lsb-ps\Documents\VEA_Playground\zero_shot_data\08_zero_shot_output\load_profiles_enriched_small.tsv"
+    DATA_PATH = r"C:\Users\lsb-ps\Documents\VEA_Playground\zero_shot_data\08_zero_shot_output\load_profiles_enriched_very_small.tsv"
     
     device_str = "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device_str)
@@ -143,11 +129,11 @@ if __name__ == "__main__":
     loaded_profiles_df = load_vea_profiles(file_path=DATA_PATH)
     
     # High Batch Size since CPU is more efficient with fewer loops
-    BATCH_SIZE = 1000 
+    BATCH_SIZE = 512 
     company_ids = loaded_profiles_df.columns
     
-    logging.info("\nLoading TimesFM 2.5 200M PyTorch Checkpoint from Hugging Face...")
-    tfm_model = timesfm.TimesFM_2p5_200M_torch.from_pretrained("google/timesfm-2.5-200m-pytorch")    
+    logging.info("\nLoading TimesFM 3.0 PyTorch Checkpoint from Hugging Face...")
+    tfm_model = timesfm.TimesFM3Forecaster.from_pretrained("google/timesfm-3.0-pytorch", per_core_batch_size=BATCH_SIZE)    
 
     try:
         tfm_model = tfm_model.to(device)
@@ -175,22 +161,8 @@ if __name__ == "__main__":
         combo_dir_name = f"c{combo_id}_lag{config['lag_days']}_horizon{config['horizon_days']}_step{config['step_days']}"
         combo_output_path = OUTPUT_BASE_DIR / combo_dir_name
         
-        timesfm_dir = combo_output_path / "google_timesfm"
+        timesfm_dir = combo_output_path / "TimesFM"
         timesfm_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Compile model for the current max_context and max_horizon configuration
-        tfm_model.compile(
-            timesfm.ForecastConfig(
-                max_context=config["lag_days"] * 96,
-                max_horizon=config["horizon_days"] * 96,
-                normalize_inputs=True,
-                use_continuous_quantile_head=False,
-                force_flip_invariance=True,
-                infer_is_positive=True,
-                fix_quantile_crossing=True,
-            )
-        )
-        
         logging.info(f"\n -> Processing {combo_dir_name}...")
         
         with ResourceProfiler(run_name=combo_dir_name, input_file_path=DATA_PATH, output_dir_path=combo_output_path):
@@ -201,8 +173,8 @@ if __name__ == "__main__":
                 
                 results = run_timesfm_pipeline(batch_df, config, tfm_model)
                 
-                if results["google_timesfm"]:
-                    df_timesfm = pd.DataFrame(results["google_timesfm"])
+                if results["TimesFM"]:
+                    df_timesfm = pd.DataFrame(results["TimesFM"])
                     df_timesfm.to_parquet(timesfm_dir / f"batch_{i}.parquet", index=False, compression="snappy")
 
                     if i == 0:
