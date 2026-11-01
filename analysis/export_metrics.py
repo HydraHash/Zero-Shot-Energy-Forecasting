@@ -1,6 +1,8 @@
 import ast
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 from pathlib import Path
 from collections import defaultdict
 from scipy.stats import wilcoxon
@@ -16,33 +18,57 @@ def export_all_raw_maes(base_output_dir: str | Path, output_file: str | Path):
         print(f"No parquet files found in {base_path}")
         return
         
-    mae_records = []
+    print(f"Extracting MAE from {len(parquet_files)} files with direct-to-disk flushing...")
+    
+    writer = None
     
     for file_path in parquet_files:
         model_name = file_path.parent.name
-        df = pd.read_parquet(file_path, engine="pyarrow", columns=['id', 'horizon_start', 'actual_values', 'predicted_values'])
         
-        for _, row in df.iterrows():
-            actuals = row['actual_values']
-            preds = row['predicted_values']
-            
-            if isinstance(actuals, str): actuals = ast.literal_eval(actuals)
-            if isinstance(preds, str): preds = ast.literal_eval(preds)
+        # Read only required columns into memory
+        df = pd.read_parquet(
+            file_path, 
+            engine="pyarrow", 
+            columns=['id', 'horizon_start', 'actual_values', 'predicted_values']
+        )
+        
+        # List comprehensions + zip are vastly faster than df.iterrows()
+        maes = []
+        for actuals, preds in zip(df['actual_values'], df['predicted_values']):
+            if isinstance(actuals, str): 
+                actuals = ast.literal_eval(actuals)
+            if isinstance(preds, str): 
+                preds = ast.literal_eval(preds)
                 
             act_arr = np.array(actuals, dtype=float)
             pred_arr = np.array(preds, dtype=float)
-    
-            mae = np.mean(np.abs(act_arr - pred_arr))
-            mae_records.append({
-                'id': row['id'],
-                'horizon_start': row['horizon_start'],
-                'model_name': model_name,
-                'mae': mae
-            })
             
-    mae_df = pd.DataFrame(mae_records)
-    mae_df.to_csv(output_file, index=False)
-    print(f"Raw MAEs saved to {output_file}")
+            maes.append(np.mean(np.abs(act_arr - pred_arr)))
+            
+        # Create a lightweight dataframe for just this batch
+        batch_df = pd.DataFrame({
+            'id': df['id'],
+            'horizon_start': df['horizon_start'],
+            'model_name': model_name,
+            'mae': maes
+        })
+        
+        table = pa.Table.from_pandas(batch_df)
+        
+        if writer is None:
+            writer = pq.ParquetWriter(output_file, table.schema)
+            
+        # Flush the batch to the parquet file on disk
+        writer.write_table(table)
+        
+        # Force garbage collection to clear RAM before the next iteration
+        del df, batch_df, table, maes
+        gc.collect()
+        
+    if writer:
+        writer.close()
+        
+    print(f"Raw MAEs successfully compiled and saved to {output_file}")
 
 
 def append_advanced_metrics(df: pd.DataFrame, baseline_mae_df: pd.DataFrame) -> pd.DataFrame:
@@ -109,7 +135,7 @@ def append_advanced_metrics(df: pd.DataFrame, baseline_mae_df: pd.DataFrame) -> 
 def process_and_export_batches(base_output_dir: str | Path, mae_file: str | Path, baseline_model_name: str):
     base_path = Path(base_output_dir)
     
-    all_maes = pd.read_csv(mae_file)
+    all_maes = pd.read_parquet(mae_file)
     baseline_maes = all_maes[all_maes['model_name'] == baseline_model_name][['id', 'horizon_start', 'mae']]
     baseline_maes.rename(columns={'mae': 'baseline_mae'}, inplace=True)
     
@@ -120,9 +146,14 @@ def process_and_export_batches(base_output_dir: str | Path, mae_file: str | Path
     parquet_files = list(base_path.rglob("*.parquet"))
     
     for file_path in parquet_files:
+        if file_path.name == Path(mae_file).name or "master_" in file_path.name:
+            continue
         batch_groups[file_path.parent].append(file_path)
 
     for parquet_dir, files in batch_groups.items():
+        if len(parquet_dir.parts) < 3:
+            continue
+            
         model_name = parquet_dir.name
         combo_name = parquet_dir.parent.name
         size_folder_name = parquet_dir.parent.parent.name
@@ -139,6 +170,12 @@ def process_and_export_batches(base_output_dir: str | Path, mae_file: str | Path
         print(f"Processing metrics for {model_name}...")
         all_batches = [pd.read_parquet(f, engine="pyarrow") for f in files]
         df = pd.concat(all_batches, ignore_index=True)
+        
+        # FINAL GUARDRAIL: Verify the required columns exist before processing
+        if 'actual_values' not in df.columns:
+            print(f"Skipping {model_name} due to missing 'actual_values' column.")
+            continue
+
         df.sort_values(by=["id", "horizon_start"], ascending=[True, True], inplace=True)
         df.reset_index(drop=True, inplace=True)
 
@@ -167,12 +204,11 @@ def process_and_export_batches(base_output_dir: str | Path, mae_file: str | Path
 
 def export_unified_wilcoxon_tests(base_output_dir: str | Path, baseline_model_name: str, target_metrics: list[str] = None, alpha: float = 0.05):
     if target_metrics is None:
-        target_metrics = ['horizon_smape_median', 'horizon_rmae_median']
+        target_metrics = ['horizon_smape_median_median', 'horizon_rmae_median']
         
     base_path = Path(base_output_dir)
     output_file = base_path / "master_wilcoxon_tests.parquet"
     
-    # Implementation of the requested skip-check
     if output_file.exists():
         print(f"Skipping statistical testing - '{output_file.name}' already exists.")
         return
@@ -182,16 +218,18 @@ def export_unified_wilcoxon_tests(base_output_dir: str | Path, baseline_model_na
         print("No TSV metric files found for statistical testing.")
         return
         
-    # 1. Parse filename metadata to strictly isolate evaluation cohorts
     file_metadata = []
     for f in tsv_files:
-        parts = f.stem.split('_')
-        if len(parts) < 4:
+        core_name = f.stem.replace("metrics_", "")
+        if "_small_" in core_name:
+            size = "small"
+            model, combo_prefix = core_name.split("_small_")
+        elif "_normal_" in core_name:
+            size = "normal"
+            model, combo_prefix = core_name.split("_normal_")
+        else:
             continue
-        combo_prefix = parts[-1]
-        size = parts[-2]
-        # Rejoin model name in case it contained underscores itself
-        model = "_".join(parts[1:-2]) 
+            
         file_metadata.append({'path': f, 'model': model, 'size': size, 'combo': combo_prefix})
         
     df_files = pd.DataFrame(file_metadata)
@@ -280,17 +318,17 @@ def export_unified_wilcoxon_tests(base_output_dir: str | Path, baseline_model_na
 
 if __name__ == "__main__":
     PREDICTION_DIR = r"C:\Users\lsb-ps\Documents\predictions_overview_lean"
-    MAE_FILE = Path(PREDICTION_DIR) / "all_models_raw_mae.csv"
+    MAE_FILE = Path(PREDICTION_DIR) / "all_models_raw_mae.parquet"
     
     # Must explicitly match the exact folder name of the baseline model
     BASELINE_NAME = "SeasonNaive"
-    TARGET_METRICS = ['horizon_rmae_median', 'horizon_smape_median']
+    TARGET_METRICS = ['horizon_rmae_median', 'horizon_smape_median_median']    
     
     if not MAE_FILE.exists():
         print("Calculating raw mae for all models...")
         export_all_raw_maes(PREDICTION_DIR, MAE_FILE)
 
-    #print("Calculating all metrics...")
+    print("Calculating all metrics...")
     #process_and_export_batches(PREDICTION_DIR, MAE_FILE, BASELINE_NAME)
 
     export_unified_wilcoxon_tests(PREDICTION_DIR, BASELINE_NAME, TARGET_METRICS)
