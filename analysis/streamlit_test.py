@@ -2,31 +2,16 @@ import streamlit as st
 import pandas as pd
 import altair as alt
 from pathlib import Path
-from collections import defaultdict
 
 BASELINE_MODELS = ['HistoricAvg', 'SeasonNaive', 'TSMixer', 'CNN']
 
 @st.cache_data
-def load_data(base_dir: str):
+def load_metrics_data(base_dir: str):
     base_path = Path(base_dir)
-    print(f"DEBUG: Searching in absolute path: {base_path.resolve()}")
-    tsv_files = list(base_path.rglob("metrics_*.tsv"))
-    
-    grouped_files = defaultdict(list)
-    for file in tsv_files:
-        core_name = file.stem.replace("metrics_", "")
-        if "_small_" in core_name:
-            size = "small"
-            model_name, combination = core_name.split("_small_")
-        elif "_normal_" in core_name:
-            size = "normal"
-            model_name, combination = core_name.split("_normal_")
-        else:
-            continue
-            
-        grouped_files[(size, combination)].append((model_name, file))
-    return grouped_files
-
+    metrics_file = base_path / "master_metrics.parquet"
+    if metrics_file.exists():
+        return pd.read_parquet(metrics_file, engine='pyarrow')
+    return pd.DataFrame()
 
 @st.cache_data
 def load_wilcoxon_stats(base_dir: str):
@@ -36,21 +21,7 @@ def load_wilcoxon_stats(base_dir: str):
         return pd.read_parquet(wilcoxon_file, engine='pyarrow')
     return pd.DataFrame()
 
-
-def process_configuration(files):
-    all_models_data = []
-    for model_name, file_path in files:
-        df = pd.read_csv(file_path, sep="\t")
-        df["model"] = model_name
-        all_models_data.append(df)
-        
-    combo_df = pd.concat(all_models_data, ignore_index=True)
-    combo_df = combo_df.replace([float('inf'), float('-inf')], pd.NA)
-    return combo_df
-
-
 def apply_thesis_theme(chart):
-    """Applies a strict white background and black typography to any Altair chart."""
     return chart.configure(
         background='white'
     ).configure_axis(
@@ -59,11 +30,11 @@ def apply_thesis_theme(chart):
         gridColor='#e5e5e5',
         domainColor='black',
         tickColor='black',
-        labelFontSize=12,
-        titleFontSize=14
+        labelFontSize=13,
+        titleFontSize=18
     ).configure_title(
         color='black',
-        fontSize=16,
+        fontSize=20,
         anchor='middle'
     ).configure_legend(
         titleColor='black',
@@ -73,67 +44,97 @@ def apply_thesis_theme(chart):
 
 st.set_page_config(page_title="ZS Model Dashboard", layout="wide")
 st.title("Energy Load Forecast Evaluation")
-
-st.sidebar.header("Data Source")
-metrics_dir = st.sidebar.text_input("Metrics Directory", r"C:\Users\lsb-ps\Documents\predictions_overview_lean")
+metrics_dir = r"C:\Users\lsb-ps\Documents\predictions_overview_lean"
 
 if Path(metrics_dir).exists():
-    grouped_files = load_data(metrics_dir)
+    df_metrics = load_metrics_data(metrics_dir)
     df_wilcoxon = load_wilcoxon_stats(metrics_dir)
     
-    if grouped_files:
-        available_configs = list(grouped_files.keys())
-        all_sizes = list(set([cfg[0] for cfg in available_configs]))
+    if not df_metrics.empty:
+        # Extract available configurations directly from the master dataframe
+        all_sizes = df_metrics['size_category'].unique().tolist()
         
         st.markdown("---")
         # --- Aggregated Metrics Summary ---
         st.subheader("Aggregated Metrics Summary & Comparison")
-        
-        agg_col1, agg_col2 = st.columns(2)
+
+        agg_col1, agg_col2, agg_col3 = st.columns(3)
         size_agg = agg_col1.selectbox("Select Size (Aggregated)", all_sizes, key="size_agg")
-        valid_combos_agg = [cfg[1] for cfg in available_configs if cfg[0] == size_agg]
+        
+        valid_combos_agg = df_metrics[df_metrics['size_category'] == size_agg]['combo_prefix'].unique().tolist()
         combo_agg = agg_col2.selectbox("Select Combination (Aggregated)", valid_combos_agg, key="combo_agg")
+
+        # Isolate the cohort and replace infinite values with NA for safe aggregation
+        agg_df = df_metrics[
+            (df_metrics['size_category'] == size_agg) & 
+            (df_metrics['combo_prefix'] == combo_agg)
+        ].replace([float('inf'), float('-inf')], pd.NA)
         
-        agg_files = grouped_files[(size_agg, combo_agg)]
-        agg_df = process_configuration(agg_files)
         total_companies_agg = agg_df['id'].nunique()
-        
         st.write(f"**Evaluating {total_companies_agg:,} Companies**")
-        
+
+        available_models_agg = agg_df['model_name'].unique().tolist()
+        default_base_idx = available_models_agg.index('SeasonNaive') if 'SeasonNaive' in available_models_agg else 0
+        baseline_agg = agg_col3.selectbox("Select Baseline for % Change", available_models_agg, index=default_base_idx, key="baseline_agg")
+
         agg_functions = {
             'horizon_rmae_median': 'median',
             'horizon_rmse_median': 'median',
             'horizon_smape_median_median': 'median', 
             'horizon_da_mean': 'mean'
         }
-        
+
         valid_agg = {k: v for k, v in agg_functions.items() if k in agg_df.columns}
-        
-        summary_stats = agg_df.groupby('model').agg(valid_agg).reset_index()
+
+        summary_stats = agg_df.groupby('model_name').agg(valid_agg).reset_index()
         summary_stats.rename(columns={
             'horizon_rmae_median': 'rMAE (Median)', 
             'horizon_rmse_median': 'RMSE (Median)',
             'horizon_smape_median_median': 'sMAPE (Median)', 
             'horizon_da_mean': 'DA (Mean)'
         }, inplace=True)
-        
-        st.dataframe(summary_stats.set_index('model'), use_container_width=True)
 
-        metric_cols = [col for col in summary_stats.columns if col != 'model']
+        base_metrics = [col for col in summary_stats.columns if col != 'model_name']
+        baseline_row = summary_stats[summary_stats['model_name'] == baseline_agg]
+
+        display_stats = summary_stats[['model_name']].copy()
+
+        for col in base_metrics:
+            display_stats[col] = summary_stats[col] 
+            
+            if not baseline_row.empty:
+                base_val = baseline_row[col].values[0]
+                if base_val != 0:
+                    display_stats[f"{col} (% Δ)"] = ((summary_stats[col] - base_val) / base_val) * 100
+                else:
+                    display_stats[f"{col} (% Δ)"] = pd.Series([
+                        float('inf') if v > 0 else (0.0 if v == 0 else float('-inf')) 
+                        for v in summary_stats[col]
+                    ])
+
+        format_dict = {col: "{:.4f}" for col in base_metrics}
+        format_dict.update({f"{col} (% Δ)": "{:+.2f}%" for col in base_metrics})
+
+        st.dataframe(
+            display_stats.set_index('model_name').style.format(format_dict, na_rep="-"), 
+            use_container_width=True
+        )
+
+        metric_cols = base_metrics 
         val_tabs = st.tabs(metric_cols)
 
         for tab, metric_col in zip(val_tabs, metric_cols):
             with tab:
-                plot_df = summary_stats[['model', metric_col]]
+                plot_df = summary_stats[['model_name', metric_col]]
                 
                 color_condition = alt.condition(
-                    alt.FieldOneOfPredicate(field='model', oneOf=BASELINE_MODELS),
+                    alt.FieldOneOfPredicate(field='model_name', oneOf=BASELINE_MODELS),
                     alt.value('#ff7f0e'), 
                     alt.value('#1f77b4')  
                 )
                 
                 chart = alt.Chart(plot_df).mark_bar().encode(
-                    x=alt.X('model:N', title='Model Name', sort='y' if metric_col != 'DA (Mean)' else '-y'),
+                    x=alt.X('model_name:N', title='Model Name', sort='y' if metric_col != 'DA (Mean)' else '-y'),
                     y=alt.Y(f'{metric_col}:Q', title=f'{metric_col}'),
                     color=color_condition
                 ).properties(width='container', height=400, title=f"Aggregated {metric_col}")
@@ -147,7 +148,8 @@ if Path(metrics_dir).exists():
         
         stat_col1, stat_col2 = st.columns(2)
         size_stat = stat_col1.selectbox("Select Size (Stats)", all_sizes, key="size_stat")
-        valid_combos_stat = [cfg[1] for cfg in available_configs if cfg[0] == size_stat]
+        
+        valid_combos_stat = df_metrics[df_metrics['size_category'] == size_stat]['combo_prefix'].unique().tolist()
         combo_stat = stat_col2.selectbox("Select Combination (Stats)", valid_combos_stat, key="combo_stat")
         
         if not df_wilcoxon.empty:
@@ -157,7 +159,12 @@ if Path(metrics_dir).exists():
             ].copy()
             
             if not cohort_wilcoxon.empty:
-                cohort_wilcoxon.drop(columns=['size_category', 'combo_prefix'], inplace=True)
+                # Drop columns that are used purely for internal slicing
+                drop_cols = ['size_category', 'combo_prefix']
+                if 'stratification_type' in cohort_wilcoxon.columns:
+                    drop_cols.extend(['stratification_type', 'stratification_value'])
+                
+                cohort_wilcoxon.drop(columns=[c for c in drop_cols if c in cohort_wilcoxon.columns], inplace=True, errors='ignore')
                 
                 metric_name_map = {
                     'horizon_rmae_median': 'rMAE (Median)',
@@ -168,18 +175,23 @@ if Path(metrics_dir).exists():
                 }
                 cohort_wilcoxon['target_metric'] = cohort_wilcoxon['target_metric'].map(metric_name_map).fillna(cohort_wilcoxon['target_metric'])
                 
-                cohort_wilcoxon.rename(columns={
+                # Dynamic column renaming based on available data from the Wilcoxon master
+                rename_map = {
                     'target_metric': 'Metric',
                     'model_name': 'Model',
                     'baseline_model': 'Baseline',
-                    'n_valid_samples': 'Valid Samples (N)',
+                    'n_valid_samples': 'Valid (N)',
                     'dropped_infs_nans': 'Dropped (Inf/NaN)',
                     'median_difference': 'Median Diff.',
+                    'win_rate_pct': 'Win Rate (%)',
+                    'rank_biserial_r': 'Effect Size (r)',
                     'w_statistic': 'W-Stat',
                     'p_value': 'p-value',
+                    'p_value_fdr': 'FDR p-value',
                     'is_significant': 'Significant',
                     'conclusion': 'Conclusion'
-                }, inplace=True)
+                }
+                cohort_wilcoxon.rename(columns=rename_map, inplace=True)
                 
                 def color_significance(val):
                     if isinstance(val, bool):
@@ -188,15 +200,22 @@ if Path(metrics_dir).exists():
                     
                 styled_df = cohort_wilcoxon.style.map(color_significance, subset=['Significant'])
                 
-                styled_df = styled_df.format({
+                format_dict = {
                     'p-value': lambda x: '< 0.001' if (x < 0.001 and x >= 0) else f"{x:.4f}",
+                    'FDR p-value': lambda x: '< 0.001' if (x < 0.001 and x >= 0) else f"{x:.4f}",
                     'Median Diff.': "{:.4f}",
-                    'W-Stat': "{:.0f}"
-                })
+                    'Win Rate (%)': "{:.2f}%",
+                    'Effect Size (r)': "{:.3f}",
+                    'W-Stat': "{:.0f}",
+                    'neg_log10_p_fdr': "{:.2f}"
+                }
+                
+                # Apply format only to columns that exist
+                styled_df = styled_df.format({k: v for k, v in format_dict.items() if k in cohort_wilcoxon.columns})
                     
                 st.dataframe(styled_df, use_container_width=True, hide_index=True)
             else:
-                st.info(f"No statistical tests found for Size: {size_stat}, Combo: {combo_stat}. Run the export script.")
+                st.info(f"No statistical tests found for Size: {size_stat}, Combo: {combo_stat}.")
         else:
             st.warning("Wilcoxon parquet file not found. Ensure 'master_wilcoxon_tests.parquet' exists in the metrics directory.")
 
@@ -207,29 +226,28 @@ if Path(metrics_dir).exists():
         
         cross_col1, cross_col2 = st.columns(2)
         size_cross = cross_col1.selectbox("Select Size (Cross-Combo)", all_sizes, key="size_cross")
-        valid_combos_cross = [cfg[1] for cfg in available_configs if cfg[0] == size_cross]
         
-        all_models = set()
-        for combo in valid_combos_cross:
-            for model_name, _ in grouped_files[(size_cross, combo)]:
-                all_models.add(model_name)
+        valid_combos_cross = df_metrics[df_metrics['size_category'] == size_cross]['combo_prefix'].unique().tolist()
+        all_models = df_metrics[df_metrics['size_category'] == size_cross]['model_name'].unique().tolist()
                 
-        target_model = cross_col2.selectbox("Select Model to Analyze Across Combinations", list(all_models), key="model_cross")
+        target_model = cross_col2.selectbox("Select Model to Analyze Across Combinations", all_models, key="model_cross")
         
         combo_comparisons = []
         for combo in valid_combos_cross:
-            files = grouped_files[(size_cross, combo)]
-            model_file = [f for m, f in files if m == target_model]
+            # Isolate the exact model, size, and combo
+            df_slice = df_metrics[
+                (df_metrics['size_category'] == size_cross) & 
+                (df_metrics['combo_prefix'] == combo) & 
+                (df_metrics['model_name'] == target_model)
+            ].replace([float('inf'), float('-inf')], pd.NA)
             
-            if model_file:
-                df = pd.read_csv(model_file[0], sep="\t").replace([float('inf'), float('-inf')], pd.NA)
+            if not df_slice.empty:
+                rmae_val = df_slice['horizon_rmae_median'].median() if 'horizon_rmae_median' in df_slice.columns else pd.NA
                 
-                rmae_val = df['horizon_rmae_median'].median() if 'horizon_rmae_median' in df.columns else pd.NA
-                
-                if 'horizon_smape_median_median' in df.columns:
-                    smape_val = df['horizon_smape_median_median'].median()
-                elif 'horizon_smape_median' in df.columns:
-                    smape_val = df['horizon_smape_median'].median()
+                if 'horizon_smape_median_median' in df_slice.columns:
+                    smape_val = df_slice['horizon_smape_median_median'].median()
+                elif 'horizon_smape_median' in df_slice.columns:
+                    smape_val = df_slice['horizon_smape_median'].median()
                 else:
                     smape_val = pd.NA
                 
@@ -243,7 +261,6 @@ if Path(metrics_dir).exists():
             comparison_df = pd.DataFrame(combo_comparisons).dropna().set_index("Combination")
             
             tab_rmae, tab_smape = st.tabs(["rMAE (Median)", "sMAPE (Median)"])
-            
             plot_df = comparison_df.reset_index()
             line_color = '#ff7f0e' if target_model in BASELINE_MODELS else '#1f77b4'
             
@@ -266,11 +283,14 @@ if Path(metrics_dir).exists():
         
         win_col1, win_col2 = st.columns(2)
         size_win = win_col1.selectbox("Select Size (Win Rates)", all_sizes, key="size_win")
-        valid_combos_win = [cfg[1] for cfg in available_configs if cfg[0] == size_win]
+        
+        valid_combos_win = df_metrics[df_metrics['size_category'] == size_win]['combo_prefix'].unique().tolist()
         combo_win = win_col2.selectbox("Select Combination (Win Rates)", valid_combos_win, key="combo_win")
         
-        win_files = grouped_files[(size_win, combo_win)]
-        win_df = process_configuration(win_files)
+        win_df = df_metrics[
+            (df_metrics['size_category'] == size_win) & 
+            (df_metrics['combo_prefix'] == combo_win)
+        ]
         
         metrics_rules = {
             'horizon_rmae_median': 'min',
@@ -286,8 +306,8 @@ if Path(metrics_dir).exists():
             
             for tab, (metric, rule) in zip(tabs, existing_metrics.items()):
                 with tab:
-                    clean_combo_df = win_df.dropna(subset=[metric])
-                    pivot_df = clean_combo_df.pivot_table(index='id', columns='model', values=metric, aggfunc='median')            
+                    clean_combo_df = win_df.replace([float('inf'), float('-inf')], pd.NA).dropna(subset=[metric])
+                    pivot_df = clean_combo_df.pivot_table(index='id', columns='model_name', values=metric, aggfunc='median')            
                     
                     if rule == 'max':
                         best_models = pivot_df.idxmax(axis=1)
@@ -311,19 +331,23 @@ if Path(metrics_dir).exists():
                     
                     st.altair_chart(apply_thesis_theme(chart), use_container_width=True)
 
+
         st.markdown("---")
-        # --- Thesis Export: Metric Comparison ---
-        st.subheader("Thesis Export: Metric Comparison")
-        st.markdown("Select parameters below to generate a publication-ready bar chart.")
+        # --- Metric Comparison ---
+        st.subheader("Metric Comparison")
+        st.markdown("Select parameters below to generate a bar chart.")
 
         exp_col1, exp_col2, exp_col3 = st.columns(3)
 
         exp_size = exp_col1.selectbox("Select Size (Export)", all_sizes, key="exp_size")
-        valid_exp_combos = [cfg[1] for cfg in available_configs if cfg[0] == exp_size]
+        
+        valid_exp_combos = df_metrics[df_metrics['size_category'] == exp_size]['combo_prefix'].unique().tolist()
         exp_combo = exp_col2.selectbox("Select Combination (Export)", valid_exp_combos, key="exp_combo")
 
-        exp_files = grouped_files[(exp_size, exp_combo)]
-        exp_df = process_configuration(exp_files)
+        exp_df = df_metrics[
+            (df_metrics['size_category'] == exp_size) & 
+            (df_metrics['combo_prefix'] == exp_combo)
+        ].replace([float('inf'), float('-inf')], pd.NA)
 
         available_exp_metrics = {}
         if 'horizon_rmae_median' in exp_df.columns: 
@@ -341,29 +365,39 @@ if Path(metrics_dir).exists():
 
         if exp_metric_label:
             raw_metric, agg_func = available_exp_metrics[exp_metric_label]
-            
-            exp_summary = exp_df.groupby('model')[raw_metric].agg(agg_func).reset_index()
-            
+            exp_summary = exp_df.groupby('model_name')[raw_metric].agg(agg_func).reset_index()
             sort_order = '-y' if exp_metric_label == 'DA (Mean)' else 'y'
             
             exp_color_condition = alt.condition(
-                alt.FieldOneOfPredicate(field='model', oneOf=BASELINE_MODELS),
+                alt.FieldOneOfPredicate(field='model_name', oneOf=BASELINE_MODELS),
                 alt.value('#ff7f0e'), 
                 alt.value('#1f77b4')  
             )
 
-            export_chart = alt.Chart(exp_summary).mark_bar().encode(
-                x=alt.X('model:N', title='Model', sort=sort_order),
+            bars = alt.Chart(exp_summary).mark_bar().encode(
+                x=alt.X('model_name:N', title='Model', sort=sort_order, axis=alt.Axis(labelAngle=-30)),
                 y=alt.Y(f'{raw_metric}:Q', title=exp_metric_label),
                 color=exp_color_condition
-            ).properties(
+            )
+            
+            text = bars.mark_text(
+                align='center',
+                fontSize=11,
+                baseline='bottom',
+                dy=-5,
+                color='black'
+            ).encode(
+                text=alt.Text(f'{raw_metric}:Q', format='.3f') 
+            )
+
+            export_chart = (bars + text).properties(
                 height=500,
-                title=f"{exp_metric_label} Comparison - Size: {exp_size.title()} | Combo: {exp_combo.upper()}"
+                title=f"{exp_metric_label} - Dataset Size: {exp_size.title()} | Forecast Combination: {exp_combo.upper()}"
             )
 
             st.altair_chart(apply_thesis_theme(export_chart), use_container_width=True)
                 
     else:
-        st.warning("No metrics files found in the specified directory.")
+        st.warning("Master metrics parquet file is empty or not generated yet.")
 else:
-    st.error("Invalid directory path.")
+    st.error("Invalid directory path. Please provide the root directory containing 'master_metrics.parquet'.")
