@@ -1,32 +1,21 @@
-import os
 import re
-import time
-import psutil
-import threading
 import numpy as np
 import pandas as pd
 import torch
 import logging
-import logging.handlers
 from chronos import ChronosBoltPipeline
 from pathlib import Path
-from system_data_psutil import ResourceProfiler
 
-# Optimize float32 matrix operations
+# Optimize CPU/GPU execution
 torch.set_float32_matmul_precision("high")
-torch.set_num_threads(48)
+torch.set_num_threads(20)
 
-
-logging.basicConfig(filename="triplec3_chronosBolt_log.txt",
-                    filemode='a',
-                    format='%(asctime)s,%(msecs)03d %(name)s %(levelname)s %(message)s',
-                    datefmt='%Y-%m-%d %H:%M:%S',
-                    level=logging.INFO)
 
 EXPERIMENTAL_COMBINATIONS = {
-    #1: {"lag_days": 1, "horizon_days": 1, "step_days": 1},
-    #2: {"lag_days": 7, "horizon_days": 7, "step_days": 7},
-    3: {"lag_days": 7, "horizon_days": 1, "step_days": 1}
+    1: {"lag_days": 1, "horizon_days": 1, "step_days": 1},
+    2: {"lag_days": 7, "horizon_days": 7, "step_days": 7},
+    3: {"lag_days": 7, "horizon_days": 1, "step_days": 1},
+    4: {"lag_days": 14, "horizon_days": 1, "step_days": 1}
 }
 
 
@@ -52,7 +41,7 @@ def run_chronos_bolt_pipeline(batch_df, config, model, model_name):
         
         context_arrays = [lag_block[cid].values.ravel() for cid in batch_df.columns]
         
-        # 1. Chronos-Bolt strictly requires a 2D shape: [Batch, Context_Length]
+        # Chronos-Bolt requires 2D shape: [Batch, Context_Length]
         rolling_context = torch.tensor(np.array(context_arrays), dtype=torch.float32)
         
         preds = []
@@ -62,22 +51,13 @@ def run_chronos_bolt_pipeline(batch_df, config, model, model_name):
             current_chunk = min(remaining_steps, CHUNK_SIZE)
             
             # Predict exact 0.5 quantile
-            quantiles, _ = model.predict_quantiles(
-                rolling_context, 
-                prediction_length=current_chunk, 
-                quantile_levels=[0.5]
-            )
-            
-            # Target the last dimension (Num_Quantiles) to keep the full Time dimension
+            quantiles, _ = model.predict_quantiles(rolling_context, prediction_length=current_chunk, quantile_levels=[0.5])
             median_2d = quantiles[:, :, 0]
-            
-            # Append 2D numpy array to our list for the final DataFrame
             preds.append(median_2d.cpu().numpy())
             
-            # 3. Concatenate directly along the Time Dimension (dim=1)
+            # Concatenate along the Time Dimension 
             chunk_tensor = median_2d.cpu().float()
             rolling_context = torch.cat([rolling_context, chunk_tensor], dim=1)
-            
             remaining_steps -= current_chunk
             
         point_forecast = np.concatenate(preds, axis=1)
@@ -101,9 +81,9 @@ def run_modelsize(model_name, data_path, batch_size, loaded_profiles_df):
     OUTPUT_BASE_DIR = Path(f"./triplec3_{model_name}_prediction_output")
     company_ids = loaded_profiles_df.columns
     device_map = "cuda" if torch.cuda.is_available() else "cpu"
+    logging.info(f"HARDWARE DETECTED: {device_map.upper()}")
     
     logging.info(f"\nStarting evaluation loop across {len(EXPERIMENTAL_COMBINATIONS)} configurations...")
-    
     for combo_id, config in EXPERIMENTAL_COMBINATIONS.items():
         combo_dir_name = f"c{combo_id}_lag{config['lag_days']}_horizon{config['horizon_days']}_step{config['step_days']}"
         combo_output_path = OUTPUT_BASE_DIR / combo_dir_name
@@ -112,32 +92,30 @@ def run_modelsize(model_name, data_path, batch_size, loaded_profiles_df):
         bolt_dir.mkdir(parents=True, exist_ok=True)
         
         logging.info(f"\n -> Processing {combo_dir_name}...")
-        
-        with ResourceProfiler(run_name=combo_dir_name, input_file_path=data_path, output_dir_path=combo_output_path):
+        logging.info(f"\nLoading Chronos-{model_name} Checkpoint...")
+        if "21" in model_name: hf_name = "mini"
+        elif "43" in model_name: hf_name = "small"
+        else: hf_name = "tiny"
 
-            logging.info(f"\nLoading Chronos-{model_name} Checkpoint...")
-            if "21" in model_name: hf_name = "mini"
-            elif "43" in model_name: hf_name = "small"
-            else: hf_name = "tiny"
-            logging.info(f"Running Model chronos-bolt-{hf_name} now")
-            chronos_bolt = ChronosBoltPipeline.from_pretrained(f"amazon/chronos-bolt-{hf_name}", device_map=device_map, dtype=torch.bfloat16)
+        logging.info(f"Running Model chronos-bolt-{hf_name} now")
+        chronos_bolt = ChronosBoltPipeline.from_pretrained(f"amazon/chronos-bolt-{hf_name}", device_map=device_map, dtype=torch.bfloat16)
+        
+        for i in range(0, len(company_ids), batch_size):
+            batch_cols = company_ids[i : i + batch_size]
+            batch_df = loaded_profiles_df[batch_cols]
+            logging.info(f"    [Chronos-Bolt] Running Batch {i} to {i + len(batch_cols)}...")
             
-            for i in range(0, len(company_ids), batch_size):
-                batch_cols = company_ids[i : i + batch_size]
-                batch_df = loaded_profiles_df[batch_cols]
-                logging.info(f"    [Chronos-Bolt] Running Batch {i} to {i + len(batch_cols)}...")
-                
-                results = run_chronos_bolt_pipeline(batch_df, config, chronos_bolt, model_name)
-                
-                if results[f"{model_name}"]:
-                    df_c2 = pd.DataFrame(results[f"{model_name}"])
-                    df_c2.to_parquet(bolt_dir / f"batch_{i}.parquet", index=False, compression="snappy", engine="pyarrow")
-                    if i == 0:
-                        df_c2.to_csv(bolt_dir / f"batch_{i}_.tsv", sep="\t", index=False)
-                    del df_c2
-                del results
-                
-            del chronos_bolt
+            results = run_chronos_bolt_pipeline(batch_df, config, chronos_bolt, model_name)
+            
+            if results[f"{model_name}"]:
+                df_c2 = pd.DataFrame(results[f"{model_name}"])
+                df_c2.to_parquet(bolt_dir / f"batch_{i}.parquet", index=False, compression="snappy", engine="pyarrow")
+                if i == 0:
+                    df_c2.to_csv(bolt_dir / f"batch_{i}_.tsv", sep="\t", index=False)
+                del df_c2
+            del results
+            
+        del chronos_bolt
                 
     logging.info(f"\nExecution loop complete. Results saved to: '{OUTPUT_BASE_DIR.absolute()}'")
 
@@ -167,7 +145,6 @@ def load_vea_profiles(file_path) -> pd.DataFrame:
             valid_time_cols.append(col)
 
     raw_df = raw_df[valid_time_cols]
-
     df_t = raw_df.T
     df_t.index = pd.DatetimeIndex(parsed_timestamps)
     
@@ -180,8 +157,14 @@ def load_vea_profiles(file_path) -> pd.DataFrame:
 
 
 if __name__ == "__main__":
-    DATA_PATH = r"C:\Users\lsb-ps\Documents\VEA_Playground\zero_shot_data\08_zero_shot_output\load_profiles_enriched.tsv"
+    DATA_PATH = r"S:\LSB-PS\zero_shot_data\08_zero_shot_output\load_profiles_enriched.tsv"
     BATCH_SIZE = 500
+
+    logging.basicConfig(filename="triplec3_chronosBolt_log.txt",
+                    filemode='a',
+                    format='%(asctime)s,%(msecs)03d %(name)s %(levelname)s %(message)s',
+                    datefmt='%Y-%m-%d %H:%M:%S',
+                    level=logging.INFO)
 
     loaded_profiles_df = load_vea_profiles(file_path=DATA_PATH)
 
