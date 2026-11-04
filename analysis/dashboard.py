@@ -13,6 +13,7 @@ def load_metrics_data(base_dir: str):
         return pd.read_parquet(metrics_file, engine='pyarrow')
     return pd.DataFrame()
 
+
 @st.cache_data
 def load_wilcoxon_stats(base_dir: str):
     base_path = Path(base_dir)
@@ -20,6 +21,29 @@ def load_wilcoxon_stats(base_dir: str):
     if wilcoxon_file.exists():
         return pd.read_parquet(wilcoxon_file, engine='pyarrow')
     return pd.DataFrame()
+
+
+@st.cache_data
+def load_masterdata(filepath: str):
+    master_path = Path(filepath)
+    if master_path.exists():
+        sep = "\t" if master_path.suffix in ['.tsv', '.csv'] else ","
+        df_master = pd.read_csv(master_path, sep=sep) if master_path.suffix != '.parquet' else pd.read_parquet(master_path)
+        
+        if 'Id' in df_master.columns:
+            df_master.rename(columns={'Id': 'id'}, inplace=True)
+            
+        if 'Sector_group_id' in df_master.columns and 'Sector_group' in df_master.columns:
+            df_master['Sector_Label'] = df_master['Sector_group_id'].astype(str) + ": " + df_master['Sector_group'].astype(str)
+            
+        # CV is extracted if it exists
+        cols_to_keep = ['id']
+        if 'Sector_Label' in df_master.columns: cols_to_keep.append('Sector_Label')
+        if 'CV' in df_master.columns: cols_to_keep.append('CV')
+            
+        return df_master[cols_to_keep].drop_duplicates()
+    return pd.DataFrame()
+
 
 def apply_thesis_theme(chart):
     return chart.configure(
@@ -45,37 +69,48 @@ def apply_thesis_theme(chart):
 st.set_page_config(page_title="ZS Model Dashboard", layout="wide")
 st.title("Energy Load Forecast Evaluation")
 metrics_dir = r"C:\Users\lsb-ps\Documents\predictions_overview_lean"
+master_dir = r"C:\Users\lsb-ps\Documents\VEA_Playground\zero_shot_data\08_zero_shot_output\master_data_imputed_with_cv.csv"
 
 if Path(metrics_dir).exists():
     df_metrics = load_metrics_data(metrics_dir)
     df_wilcoxon = load_wilcoxon_stats(metrics_dir)
+    df_master = load_masterdata(master_dir)
     
     if not df_metrics.empty:
-        # Extract available configurations directly from the master dataframe
+        if not df_master.empty and 'Sector_Label' in df_master.columns:
+            df_metrics = df_metrics.merge(df_master, on='id', how='left')
+            df_metrics['Sector_Label'] = df_metrics['Sector_Label'].fillna('Unknown')
+        else:
+            df_metrics['Sector_Label'] = 'All Sectors'
+            
         all_sizes = df_metrics['size_category'].unique().tolist()
-        
+        all_sectors = ["All Sectors"] + sorted(df_metrics[df_metrics['Sector_Label'] != 'Unknown']['Sector_Label'].unique().tolist())
+
         st.markdown("---")
         # --- Aggregated Metrics Summary ---
         st.subheader("Aggregated Metrics Summary & Comparison")
 
-        agg_col1, agg_col2, agg_col3 = st.columns(3)
+        agg_col1, agg_col2, agg_col3, agg_col4 = st.columns(4)
         size_agg = agg_col1.selectbox("Select Size (Aggregated)", all_sizes, key="size_agg")
         
         valid_combos_agg = df_metrics[df_metrics['size_category'] == size_agg]['combo_prefix'].unique().tolist()
         combo_agg = agg_col2.selectbox("Select Combination (Aggregated)", valid_combos_agg, key="combo_agg")
 
-        # Isolate the cohort and replace infinite values with NA for safe aggregation
-        agg_df = df_metrics[
-            (df_metrics['size_category'] == size_agg) & 
-            (df_metrics['combo_prefix'] == combo_agg)
-        ].replace([float('inf'), float('-inf')], pd.NA)
+        sector_agg = agg_col3.selectbox("Select Sector (Aggregated)", all_sectors, key="sector_agg")
+
+        # Dynamic Masking for Sector
+        cohort_mask = (df_metrics['size_category'] == size_agg) & (df_metrics['combo_prefix'] == combo_agg)
+        if sector_agg != "All Sectors":
+            cohort_mask = cohort_mask & (df_metrics['Sector_Label'] == sector_agg)
+
+        agg_df = df_metrics[cohort_mask].replace([float('inf'), float('-inf')], pd.NA)
         
         total_companies_agg = agg_df['id'].nunique()
         st.write(f"**Evaluating {total_companies_agg:,} Companies**")
 
         available_models_agg = agg_df['model_name'].unique().tolist()
         default_base_idx = available_models_agg.index('SeasonNaive') if 'SeasonNaive' in available_models_agg else 0
-        baseline_agg = agg_col3.selectbox("Select Baseline for % Change", available_models_agg, index=default_base_idx, key="baseline_agg")
+        baseline_agg = agg_col4.selectbox("Select Baseline for % Change", available_models_agg, index=default_base_idx, key="baseline_agg")
 
         agg_functions = {
             'horizon_rmae_median': 'median',
@@ -278,7 +313,7 @@ if Path(metrics_dir).exists():
 
 
         st.markdown("---")
-        # --- Win Rates ---
+        # --- Win Rates Per Metric ---
         st.subheader("Company-Level Win Rates")
         
         win_col1, win_col2 = st.columns(2)
@@ -337,17 +372,21 @@ if Path(metrics_dir).exists():
         st.subheader("Metric Comparison")
         st.markdown("Select parameters below to generate a bar chart.")
 
-        exp_col1, exp_col2, exp_col3 = st.columns(3)
+        exp_col1, exp_col2, exp_col3, exp_col4 = st.columns(4)
 
         exp_size = exp_col1.selectbox("Select Size (Export)", all_sizes, key="exp_size")
         
         valid_exp_combos = df_metrics[df_metrics['size_category'] == exp_size]['combo_prefix'].unique().tolist()
         exp_combo = exp_col2.selectbox("Select Combination (Export)", valid_exp_combos, key="exp_combo")
+        
+        sector_exp = exp_col3.selectbox("Select Sector (Export)", all_sectors, key="sector_exp")
 
-        exp_df = df_metrics[
-            (df_metrics['size_category'] == exp_size) & 
-            (df_metrics['combo_prefix'] == exp_combo)
-        ].replace([float('inf'), float('-inf')], pd.NA)
+        # Dynamic Masking for Sector
+        exp_mask = (df_metrics['size_category'] == exp_size) & (df_metrics['combo_prefix'] == exp_combo)
+        if sector_exp != "All Sectors":
+            exp_mask = exp_mask & (df_metrics['Sector_Label'] == sector_exp)
+
+        exp_df = df_metrics[exp_mask].replace([float('inf'), float('-inf')], pd.NA)
 
         available_exp_metrics = {}
         if 'horizon_rmae_median' in exp_df.columns: 
@@ -361,7 +400,7 @@ if Path(metrics_dir).exists():
         if 'horizon_da_mean' in exp_df.columns: 
             available_exp_metrics['DA (Mean)'] = ('horizon_da_mean', 'mean')
 
-        exp_metric_label = exp_col3.selectbox("Select Core Metric", list(available_exp_metrics.keys()), key="exp_metric")
+        exp_metric_label = exp_col4.selectbox("Select Core Metric", list(available_exp_metrics.keys()), key="exp_metric")
 
         if exp_metric_label:
             raw_metric, agg_func = available_exp_metrics[exp_metric_label]
@@ -392,10 +431,65 @@ if Path(metrics_dir).exists():
 
             export_chart = (bars + text).properties(
                 height=500,
-                title=f"{exp_metric_label} - Dataset Size: {exp_size.title()} | Forecast Combination: {exp_combo.upper()}"
+                title=f"{exp_metric_label} - Size: {exp_size.title()} | Combo: {exp_combo.upper()} | Sector: {sector_exp}"
             )
 
             st.altair_chart(apply_thesis_theme(export_chart), use_container_width=True)
+
+
+        st.markdown("---")
+        # --- Predictability Distribution ---
+        st.subheader("Predictability Distribution: Variance vs. Error Floor")
+        st.markdown("Analyzes the correlation between inherent time-series volatility (CV) and the empirical lower bound of predictability (lowest achieved error).")
+
+        pred_col1, pred_col2 = st.columns(2)
+        size_pred = pred_col1.selectbox("Select Size (Predictability)", all_sizes, key="size_pred")
+        
+        valid_combos_pred = df_metrics[df_metrics['size_category'] == size_pred]['combo_prefix'].unique().tolist()
+        combo_pred = pred_col2.selectbox("Select Combination (Predictability)", valid_combos_pred, key="combo_pred")
+
+        pred_df = df_metrics[
+            (df_metrics['size_category'] == size_pred) & 
+            (df_metrics['combo_prefix'] == combo_pred)
+        ].copy()
+
+        # Identify the core sMAPE column
+        smape_col = 'horizon_smape_median_median' if 'horizon_smape_median_median' in pred_df.columns else 'horizon_smape_median'
+        
+        # Calculate Empirical Lower Bound per ID
+        lower_bound_df = pred_df.groupby('id')[smape_col].min().reset_index()
+        lower_bound_df.rename(columns={smape_col: 'Minimum_sMAPE'}, inplace=True)
+
+        if not df_master.empty and 'CV' in df_master.columns:
+            # Merge with Masterdata to pair CV with the minimum achieved error
+            merged_pred = lower_bound_df.merge(df_master[['id', 'CV']], on='id', how='inner')
+            merged_pred = merged_pred[merged_pred['CV'] >= 0].dropna(subset=['CV', 'Minimum_sMAPE'])
+            
+            if not merged_pred.empty:
+                # Calculate Pearson Correlation
+                pearson_corr = merged_pred['CV'].corr(merged_pred['Minimum_sMAPE'])
+                
+                st.info(f"**Pearson Correlation Coefficient ($r$):** `{pearson_corr:.4f}`")
+                
+                # Scatter Plot with Regression Trendline
+                scatter = alt.Chart(merged_pred).mark_circle(size=40, opacity=0.4, color='#1f77b4').encode(
+                    x=alt.X('CV:Q', title='Coefficient of Variation (CV)'),
+                    y=alt.Y('Minimum_sMAPE:Q', title='Empirical Lower Bound (Min sMAPE)'),
+                    tooltip=['id', 'CV', 'Minimum_sMAPE']
+                )
+                
+                trendline = scatter.transform_regression('CV', 'Minimum_sMAPE').mark_line(color='#ff7f0e', strokeWidth=3)
+                
+                pred_chart = (scatter + trendline).properties(
+                    height=500,
+                    title=f"Predictability Bound vs. Variance (Size: {size_pred.title()} | Combo: {combo_pred.upper()})"
+                ).interactive()
+                
+                st.altair_chart(apply_thesis_theme(pred_chart), use_container_width=True)
+            else:
+                st.warning("No valid overlapping IDs found between the metrics and the masterdata CV column.")
+        else:
+            st.error("The Coefficient of Variation column was not found in the masterdata.")
                 
     else:
         st.warning("Master metrics parquet file is empty or not generated yet.")
