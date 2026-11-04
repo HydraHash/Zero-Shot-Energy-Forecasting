@@ -1,34 +1,21 @@
-import os
 import re
-import time
-import psutil
-import threading
 import numpy as np
 import pandas as pd
 import tensorflow as tf
 import logging
 from pathlib import Path
-from system_data_psutil import ResourceProfiler
 
-# =====================================================================
-# 1. Parameter Configuration Matrix
-# =====================================================================
-OUTPUT_BASE_DIR = Path("./test_cnn_prediction_output")
 
-logging.basicConfig(filename="test_cnn_log.txt",
-                    filemode='a',
-                    format='%(asctime)s,%(msecs)03d %(name)s %(levelname)s %(message)s',
-                    datefmt='%Y-%m-%d %H:%M:%S',
-                    level=logging.INFO)
+
 
 EXPERIMENTAL_COMBINATIONS = {
-    1: {"train_split_days": 30, "lag_days": 1, "horizon_days": 1, "step_days": 1},
-    2: {"train_split_days": 30,  "lag_days": 7, "horizon_days": 7, "step_days": 7},
-    3: {"train_split_days": 30,  "lag_days": 7, "horizon_days": 1, "step_days": 1},
-
+    1: {"lag_days": 1, "horizon_days": 1, "step_days": 1},
+    2: {"lag_days": 7, "horizon_days": 7, "step_days": 7},
+    3: {"lag_days": 7, "horizon_days": 1, "step_days": 1},
+    4: {"lag_days": 14, "horizon_days": 1, "step_days": 1}
 }
 
-# Google CNN Code
+# TSMixer CNN Code from Google Research
 class CNNModel(tf.keras.Model):
     def __init__(self, n_channel, pred_len, kernel_size):
         super().__init__()
@@ -38,7 +25,6 @@ class CNNModel(tf.keras.Model):
         self.dense = tf.keras.layers.Dense(pred_len)
 
     def call(self, x):
-        # x: [Batch, Input length, Channel]
         x = self.cnn(x)
         x = tf.transpose(x, perm=[0, 2, 1])  # [Batch, Channel, Input Length]
         x = self.dense(x)
@@ -52,8 +38,6 @@ def create_lag_features(series_values, lag_steps, horizon_steps):
         X.append(series_values[i : i + lag_steps])
         y.append(series_values[i + lag_steps : i + lag_steps + horizon_steps])
     return np.array(X), np.array(y)
-
-
 
 
 def train_cnn(uci_df: pd.DataFrame, lag_steps: int, horizon_steps: int):
@@ -71,7 +55,6 @@ def train_cnn(uci_df: pd.DataFrame, lag_steps: int, horizon_steps: int):
     X_train_matrix = np.expand_dims(X_train_matrix, axis=-1)
     y_train_matrix = np.expand_dims(y_train_matrix, axis=-1)
     
-
     tf.keras.backend.clear_session() 
     model = CNNModel(n_channel=1, pred_len=horizon_steps, kernel_size=3)
     model.compile(optimizer='adam', loss='mse')
@@ -88,7 +71,7 @@ def run_zs_interference(vea_df: pd.DataFrame, config: dict, pretrained_model):
     s_steps = config["step_days"] * 96
     total_steps = len(vea_df)
     
-    strategy_data = {"CNNOutDom": []}
+    strategy_data = {"CNN": []}
     
     for start_idx in range(0, total_steps - lag_steps - horizon_steps + 1, s_steps):
         origin_idx = start_idx + lag_steps
@@ -100,13 +83,15 @@ def run_zs_interference(vea_df: pd.DataFrame, config: dict, pretrained_model):
         
         lag_block = vea_df.iloc[start_idx:origin_idx]
         actual_block = vea_df.iloc[origin_idx:end_idx]
+
         X_test_batch = np.array([lag_block[cid].values.ravel() for cid in vea_df.columns])
         X_test_batch = np.expand_dims(X_test_batch, axis=-1) # Shape: [500, lag_steps, 1]
-        
+
+        # Inference using the frozen UCI weights
         preds = pretrained_model.predict(X_test_batch, verbose=0) # Shape: [500, horizon_steps, 1]
-        preds = preds.squeeze(axis=-1)                 # Shape: [500, horizon_steps]
+        preds = preds.squeeze(axis=-1) # Shape: [500, horizon_steps]
         
-        # 4. Map the predictions back to the Parquet/TSV format
+        # Map the predictions back to the Parquet/TSV format
         for i, company_id in enumerate(batch_df.columns):
             y_actual_slice = actual_block[company_id].values.ravel()
             pred_cnn = preds[i]
@@ -120,14 +105,12 @@ def run_zs_interference(vea_df: pd.DataFrame, config: dict, pretrained_model):
                 "actual_values": y_actual_slice.tolist(),
                 "predicted_values": pred_cnn.tolist()
             }
-            strategy_data["CNNOutDom"].append(row_cnn)
+            strategy_data["CNN"].append(row_cnn)
             
     return strategy_data
 
 
 def load_train_dataset(file_path, max_clients: int = 50, months: int = 4) -> pd.DataFrame:
-    logging.info("Loading UCI Electricity Dataset for Training...")
-
     load_cols = [0] + list(range(1, max_clients + 1))
     
     df = pd.read_csv(file_path, sep=';', decimal=',', index_col=0, parse_dates=True, usecols=load_cols)
@@ -147,14 +130,11 @@ def load_vea_profiles(file_path) -> pd.DataFrame:
     else:
         raw_df = pd.read_csv(file_path, sep="\t")
 
-    # Set company ID (first column) as index
     id_col = raw_df.columns[0]
     raw_df.set_index(id_col, inplace=True)
 
     valid_time_cols = []
     parsed_timestamps = []
-
-    # Combined regex pattern for 'YYYY-MM-DD|Weekday|HH:MM-HH:MM' or simple 'YYYY-MM-DD HH:MM'
     pattern = re.compile(r"(\d{4}-\d{2}-\d{2}).*?(\d{1,2}:\d{2})")
 
     for col in raw_df.columns:
@@ -167,14 +147,10 @@ def load_vea_profiles(file_path) -> pd.DataFrame:
         else:
             logging.info(f" -> [Warning] Skipping non-timestamp column header: '{col}'")
 
-    # Filter DataFrame to keep only valid timeslot columns
     raw_df = raw_df[valid_time_cols]
-
-    # Transpose and assign DatetimeIndex globally
     df_t = raw_df.T
     df_t.index = pd.DatetimeIndex(parsed_timestamps)
     
-    # Sort index chronologically, handle duplicates, force frequency, and fill gaps
     df_t = df_t[~df_t.index.duplicated(keep='first')].sort_index()
     df_t = df_t.loc[:, ~df_t.columns.duplicated(keep='first')]
     df_t = df_t.asfreq("15min").ffill().bfill()
@@ -184,44 +160,49 @@ def load_vea_profiles(file_path) -> pd.DataFrame:
 
 
 if __name__ == "__main__":
-    DATA_PATH = r"C:\Users\lsb-ps\Documents\VEA_Playground\zero_shot_data\08_zero_shot_output\load_profiles_enriched_very_small.tsv"
-    TRAIN_DATA_PATH = r"C:\Users\lsb-ps\Documents\electricityloaddiagrams20112014\LD2011_2014.txt"
+    DATA_PATH = r"example\Path\data.tsv"
+    TRAIN_DATA_PATH = r"example\Data\Path.txt"
+    BATCH_SIZE = 268
+    OUTPUT_BASE_DIR = Path("./c4_cnn_prediction_output")
+
+    logging.basicConfig(filename="c4_cnn_log.txt",
+                        filemode='a',
+                        format='%(asctime)s,%(msecs)03d %(name)s %(levelname)s %(message)s',
+                        datefmt='%Y-%m-%d %H:%M:%S',
+                        level=logging.INFO)
 
     loaded_profiles_df = load_vea_profiles(file_path=DATA_PATH)
-    train_profiles_df = load_train_dataset(TRAIN_DATA_PATH)
-    BATCH_SIZE = 268
+    train_profiles_df = load_train_dataset(TRAIN_DATA_PATH)0
     company_ids = loaded_profiles_df.columns
     
     logging.info(f"\nStarting evaluation loop across {len(EXPERIMENTAL_COMBINATIONS)} configurations...")
-    
     for combo_id, config in EXPERIMENTAL_COMBINATIONS.items():
         combo_dir_name = f"c{combo_id}_lag{config['lag_days']}_horizon{config['horizon_days']}_step{config['step_days']}"
         combo_output_path = OUTPUT_BASE_DIR / combo_dir_name
         
-        cnn_dir = combo_output_path / "CNNOutDom"
+        cnn_dir = combo_output_path / "CNN"
         cnn_dir.mkdir(parents=True, exist_ok=True)
         
         logging.info(f"\n -> Processing {combo_dir_name}...")
 
         trained_cnn = train_cnn(train_profiles_df, config["lag_days"] * 96, config["horizon_days"] * 96)
         
-        with ResourceProfiler(run_name=combo_dir_name, input_file_path=DATA_PATH, output_dir_path=combo_output_path):
-            for i in range(0, len(company_ids), BATCH_SIZE):
-                batch_cols = company_ids[i : i + BATCH_SIZE]
-                batch_df = loaded_profiles_df[batch_cols]
-                logging.info(f"    Running Batch {i} to {i + len(batch_cols)}...")
-                
-                results = run_zs_interference(batch_df, config, trained_cnn)
-                
-                if results["CNNOutDom"]:
-                    df_cnn = pd.DataFrame(results["CNNOutDom"])
-                    df_cnn.to_parquet(cnn_dir / f"batch_{i}.parquet", index=False, compression="snappy", engine="pyarrow")
+        for i in range(0, len(company_ids), BATCH_SIZE):
+            batch_cols = company_ids[i : i + BATCH_SIZE]
+            batch_df = loaded_profiles_df[batch_cols]
+            logging.info(f"    Running Batch {i} to {i + len(batch_cols)}...")
+            
+            results = run_zs_interference(batch_df, config, trained_cnn)
+            
+            if results["CNN"]:
+                df_cnn = pd.DataFrame(results["CNN"])
+                df_cnn.to_parquet(cnn_dir / f"batch_{i}.parquet", index=False, compression="snappy", engine="pyarrow")
 
-                    if i == 0:
-                        tsv_path = cnn_dir / f"batch_{i}_.tsv"
-                        df_cnn.to_csv(tsv_path, sep="\t", index=False)
-                    
-                    del df_cnn 
-                del results
+                if i == 0:
+                    tsv_path = cnn_dir / f"batch_{i}_.tsv"
+                    df_cnn.to_csv(tsv_path, sep="\t", index=False)
+                
+                del df_cnn 
+            del results
                 
     logging.info(f"\nExecution loop complete. Results saved to: '{OUTPUT_BASE_DIR.absolute()}'")

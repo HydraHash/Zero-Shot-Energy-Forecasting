@@ -1,35 +1,22 @@
-import os
 import re
-import time
-import psutil
-import threading
 import numpy as np
 import pandas as pd
 import tensorflow as tf
 import logging
 from tensorflow.keras import layers
 from pathlib import Path
-from system_data_psutil import ResourceProfiler
 from tsmixer_revin import RevNorm
 
-# Parameter Configuration Matrix
-OUTPUT_BASE_DIR = Path("./small_outdom_prediction_output")
-
-logging.basicConfig(filename="small_outdom_tsmixer_log.txt",
-                    filemode='a',
-                    format='%(asctime)s,%(msecs)03d %(name)s %(levelname)s %(message)s',
-                    datefmt='%Y-%m-%d %H:%M:%S',
-                    level=logging.INFO)
 
 EXPERIMENTAL_COMBINATIONS = {
-    1: {"train_split_days": 30, "lag_days": 1, "horizon_days": 1, "step_days": 1},
-    2: {"train_split_days": 30,  "lag_days": 7, "horizon_days": 7, "step_days": 7},
-    3: {"train_split_days": 30,  "lag_days": 7, "horizon_days": 1, "step_days": 1},
+    1: {"lag_days": 1, "horizon_days": 1, "step_days": 1},
+    2: {"lag_days": 7, "horizon_days": 7, "step_days": 7},
+    3: {"lag_days": 7, "horizon_days": 1, "step_days": 1},
+    4: {"lag_days": 14, "horizon_days": 1, "step_days": 1}
 }
 
-# TSMixer + RevIN Code (Google Research)
+# TSMixer + RevIN Code from Google Research
 def res_block(inputs, norm_type, activation, dropout, ff_dim):
-    """Residual block of TSMixer."""
     if norm_type == 'L':
         norm_layer_1 = layers.LayerNormalization(axis=[-2, -1])
         norm_layer_2 = layers.LayerNormalization(axis=[-2, -1])
@@ -37,16 +24,10 @@ def res_block(inputs, norm_type, activation, dropout, ff_dim):
         norm_layer_1 = layers.BatchNormalization(axis=-1)
         norm_layer_2 = layers.BatchNormalization(axis=-1)
 
-    # Temporal Linear Block
     x = norm_layer_1(inputs)
-    # FIX: Use Keras Permute layer instead of tf.transpose
     x = layers.Permute((2, 1))(x)  # [Batch, Channel, Input Length]
-    
     x = layers.Dense(x.shape[-1], activation=activation)(x)
-    
-    # FIX: Use Keras Permute layer instead of tf.transpose
     x = layers.Permute((2, 1))(x)  # [Batch, Input Length, Channel]
-    
     x = layers.Dropout(dropout)(x)
     res = x + inputs
 
@@ -61,7 +42,6 @@ def res_block(inputs, norm_type, activation, dropout, ff_dim):
 
 
 def build_tsmixer_revin_model(input_shape, pred_len, norm_type='L', activation='relu', n_block=2, dropout=0.1, ff_dim=64, target_slice=None):
-    """Build TSMixer with Reversible Instance Normalization model."""
     inputs = tf.keras.Input(shape=input_shape)
     x = inputs  # [Batch, Input Length, Channel]
     
@@ -74,13 +54,10 @@ def build_tsmixer_revin_model(input_shape, pred_len, norm_type='L', activation='
     if target_slice:
         x = x[:, :, target_slice]
 
-    # FIX: Use Keras Permute layer instead of tf.transpose
     x = layers.Permute((2, 1))(x)  # [Batch, Channel, Input Length]
     x = layers.Dense(pred_len)(x)  # [Batch, Channel, Output Length]
     
-    # FIX: Use Keras Permute layer instead of tf.transpose
     outputs = layers.Permute((2, 1))(x)  # [Batch, Output Length, Channel]
-    
     outputs = rev_norm(outputs, mode='denorm', target_slice=target_slice)
     
     return tf.keras.Model(inputs, outputs)
@@ -103,8 +80,6 @@ def run_zs_inference(vea_df: pd.DataFrame, config: dict, pretrained_model):
     strategy_data = {"TSMixer": []}
     
     logging.info("Running Zero-Shot Inference on VEA Dataset...")
-    
-    # Notice we start exactly at index 0. No train_split_days offset.
     for start_idx in range(0, total_steps - lag_steps - horizon_steps + 1, s_steps):
         origin_idx = start_idx + lag_steps
         end_idx = origin_idx + horizon_steps
@@ -139,8 +114,6 @@ def run_zs_inference(vea_df: pd.DataFrame, config: dict, pretrained_model):
 
 
 def load_train_dataset(file_path, max_clients: int = 50, months: int = 4) -> pd.DataFrame:
-    logging.info("Loading UCI Electricity Dataset for Training...")
-
     load_cols = [0] + list(range(1, max_clients + 1))
     
     df = pd.read_csv(file_path, sep=';', decimal=',', index_col=0, parse_dates=True, usecols=load_cols, dtype=np.float32)
@@ -155,7 +128,6 @@ def load_train_dataset(file_path, max_clients: int = 50, months: int = 4) -> pd.
 def train_tsmixer(uci_df: pd.DataFrame, lag_steps: int, horizon_steps: int):
     global_X_train, global_y_train = [], []
     
-    logging.info("Extracting training sequences from training data...")
     for client_id in uci_df.columns:
         series_vals = uci_df[client_id].values.ravel()
         X_train, y_train = create_lag_features(series_vals, lag_steps, horizon_steps)
@@ -193,14 +165,11 @@ def load_vea_profiles(file_path) -> pd.DataFrame:
     else:
         raw_df = pd.read_csv(file_path, sep="\t")
 
-    # Set company ID (first column) as index
     id_col = raw_df.columns[0]
     raw_df.set_index(id_col, inplace=True)
 
     valid_time_cols = []
     parsed_timestamps = []
-
-    # Combined regex pattern for 'YYYY-MM-DD|Weekday|HH:MM-HH:MM' or simple 'YYYY-MM-DD HH:MM'
     pattern = re.compile(r"(\d{4}-\d{2}-\d{2}).*?(\d{1,2}:\d{2})")
 
     for col in raw_df.columns:
@@ -213,14 +182,10 @@ def load_vea_profiles(file_path) -> pd.DataFrame:
         else:
             logging.info(f" -> [Warning] Skipping non-timestamp column header: '{col}'")
 
-    # Filter DataFrame to keep only valid timeslot columns
     raw_df = raw_df[valid_time_cols]
-
-    # Transpose and assign DatetimeIndex globally
     df_t = raw_df.T
     df_t.index = pd.DatetimeIndex(parsed_timestamps)
     
-    # Sort index chronologically, handle duplicates, force frequency, and fill gaps
     df_t = df_t[~df_t.index.duplicated(keep='first')].sort_index()
     df_t = df_t.loc[:, ~df_t.columns.duplicated(keep='first')]
     df_t = df_t.asfreq("15min").ffill().bfill()
@@ -229,18 +194,23 @@ def load_vea_profiles(file_path) -> pd.DataFrame:
     return df_t
 
 
-# Main Execution Block
 if __name__ == "__main__":
-    DATA_PATH = r"C:\Users\lsb-ps\Documents\VEA_Playground\zero_shot_data\08_zero_shot_output\load_profiles_enriched_small.tsv"
-    TRAIN_DATA_PATH = r"C:\Users\lsb-ps\Documents\electricityloaddiagrams20112014\LD2011_2014.txt"
+    DATA_PATH = r"example\Path\data.tsv"
+    TRAIN_DATA_PATH = r"example\Path\train.txt"
+    BATCH_SIZE = 500
+    OUTPUT_BASE_DIR = Path("./tsmixerc4_prediction_output")
+
+    logging.basicConfig(filename="c4_tsmixer_log.txt",
+                        filemode='a',
+                        format='%(asctime)s,%(msecs)03d %(name)s %(levelname)s %(message)s',
+                        datefmt='%Y-%m-%d %H:%M:%S',
+                        level=logging.INFO)
     
     loaded_profiles_df = load_vea_profiles(file_path=DATA_PATH)
     train_profiles_df = load_train_dataset(TRAIN_DATA_PATH)
-    BATCH_SIZE = 268 #268 due to memory error
     company_ids = loaded_profiles_df.columns
     
     logging.info(f"\nStarting evaluation loop across {len(EXPERIMENTAL_COMBINATIONS)} configurations...")
-    
     for combo_id, config in EXPERIMENTAL_COMBINATIONS.items():
         combo_dir_name = f"c{combo_id}_lag{config['lag_days']}_horizon{config['horizon_days']}_step{config['step_days']}"
         combo_output_path = OUTPUT_BASE_DIR / combo_dir_name
