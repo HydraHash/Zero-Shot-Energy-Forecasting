@@ -257,7 +257,11 @@ model_Moirai2/uni2ts/example
 model_Moirai2/uni2ts/project
 model_Moirai2/uni2ts/src
 model_Moirai2/uni2ts/test
-model_Moirai2/uni2ts/*.md
+model_Moirai2/uni2ts/README.md
+model_Moirai2/uni2ts/AI_ETHICS.md
+model_Moirai2/uni2ts/CODE_OF_CONDUCT.md
+model_Moirai2/uni2ts/CONTRIBUTING.md
+model_Moirai2/uni2ts/SECURITY.md
 model_Moirai2/uni2ts/*.yaml
 model_Moirai2/uni2ts/CITATION.cff
 model_Moirai2/uni2ts/CODEOWNERS
@@ -272,7 +276,7 @@ model_TimeLLM/Time-LLM/layers
 model_TimeLLM/Time-LLM/models
 model_TimeLLM/Time-LLM/scripts
 model_TimeLLM/Time-LLM/utils
-model_TimeLLM/Time-LLM/*.md
+model_TimeLLM/Time-LLM/LEGAL.md
 model_TimeLLM/Time-LLM/*.json
 model_TimeLLM/Time-LLM/LICENSE
 
@@ -286,11 +290,34 @@ model_TimesFM/timesfm/src
 model_TimesFM/timesfm/tests
 model_TimesFM/timesfm/timesfm-forecasting
 model_TimesFM/timesfm/v1
-model_TimesFM/timesfm/*.md
+model_TimesFM/timesfm/README.md
+model_TimesFM/timesfm/AGENTS.md
 model_TimesFM/timesfm/LICENSE
 model_TimesFM/timesfm/pyproject.toml
 
+model_Lag_Llama/lag-llama/__pycache__
+model_Lag_Llama/lag-llama/checkpoints
+model_Lag_Llama/lag-llama/configs
+model_Lag_Llama/lag-llama/data
+model_Lag_Llama/lag-llama/gluon_utils
+model_Lag_Llama/lag-llama/images
+model_Lag_Llama/lag-llama/lag_llama
+model_Lag_Llama/lag-llama/scripts
+model_Lag_Llama/lag-llama/utils
+model_Lag_Llama/lag-llama/.gitignore
+model_Lag_Llama/lag-llama/LICENSE
+model_Lag_Llama/lag-llama/MANIFEST.in
+model_Lag_Llama/lag-llama/pyproject.toml
+model_Lag_Llama/lag-llama/VERSION
+
+analysis/analyze_format.py
+analysis/evaluation_metrics_v1.py
+analysis/comparison_report.py
+
+
 # Other downloaded repository files
 model_Kairos/Kairos/
-model_Lag_Llama/lag-llama
 model_Timer/Large-Time-Series-Model
+
+# writeup
+writeup/
