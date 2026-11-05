@@ -1,9 +1,123 @@
 import streamlit as st
 import pandas as pd
 import altair as alt
+import re
 from pathlib import Path
 
 BASELINE_MODELS = ['HistoricAvg', 'SeasonNaive', 'TSMixer', 'CNN']
+
+MODEL_NAME_TO_TXT = {
+    'TSMixer': '1_TSMixer',
+    'CNN': '2_GoogleCNN',
+    'GoogleCNN': '2_GoogleCNN',
+    'SeasonNaive': '3_SeasonNaive',
+    'HistoricAvg': '4_HistoricAvg',
+    'Chronos2': '6_Chronos2',
+    'TimeLLM': '7_TimeLLM',
+    'TimesFM25': '8_TimesFM25',
+    'Moirai10': '9_Moirai10',
+    'Moirai11': '10_Moirai11',
+    'Moirai20': '11_Moirai20',
+    'TimerBase': '12_TimerBase',
+    'LagLlama': '13_LagLLama',
+    'LagLLama': '13_LagLLama',
+    'Tirex': '14_Tirex',
+    'Kairos10m': '15_Kairos10',
+    'Kairos23m': '16_Kairos23',
+    'kairos23m': '16_Kairos23',
+    'Kairos50m': '17_Kairos50',
+    'kairos50m': '17_Kairos50',
+    'Sundial': '18_Sundial128',
+    'Bolt9m': '19_ChronosBolt9',
+    'Bolt21m': '20_ChronosBolt21',
+    'Bolt43m': '21_ChronosBolt43',
+    'Moment1': '22_Moment1',
+    'TimesFM30': '24_TimesFM30',
+}
+
+
+def parse_duration_to_seconds(time_str: str) -> float | None:
+    if not time_str or time_str.strip() == '-':
+        return None
+    clean = re.sub(r'\[.*?\]|\(!\)', '', time_str).strip()
+    if not clean or clean == '-':
+        return None
+
+    h_match = re.search(r'(\d+)\s*h', clean)
+    m_match = re.search(r'(\d+)\s*m', clean)
+    s_match = re.search(r'(\d+)\s*s', clean)
+
+    if not (h_match or m_match or s_match):
+        return None
+
+    hours = int(h_match.group(1)) if h_match else 0
+    minutes = int(m_match.group(1)) if m_match else 0
+    seconds = int(s_match.group(1)) if s_match else 0
+
+    total = hours * 3600 + minutes * 60 + seconds
+    return float(total) if total > 0 else None
+
+
+def load_inference_times(metrics_dir: str = "") -> dict:
+    candidate_paths = [
+        Path(__file__).resolve().parent / "inference_time_overview.txt",
+        Path(__file__).resolve().parent / "execution_time_overview.txt",
+        Path(metrics_dir) / "execution_time_overview.txt",
+        Path(metrics_dir) / "inference_time_overview.txt",
+        Path(r"C:\Users\lsb-ps\Documents\zs_implementation\analysis\inference_time_overview.txt"),
+        Path(r"C:\Users\lsb-ps\Documents\predictions_overview_lean\execution_time_overview.txt"),
+    ]
+    target_file = None
+    for p in candidate_paths:
+        if p and p.exists():
+            target_file = p
+            break
+
+    if not target_file:
+        return {}
+
+    try:
+        lines = target_file.read_text(encoding='utf-8').splitlines()
+    except Exception:
+        try:
+            lines = target_file.read_text(encoding='latin-1').splitlines()
+        except Exception:
+            return {}
+
+    inference_dict = {}
+    combo_headers = []
+    for line in lines:
+        if '|' not in line:
+            continue
+        parts = [p.strip() for p in line.split('|')]
+        if len(parts) >= 7 and 'Model Name' in parts[1]:
+            combo_headers = [c.lower() for c in parts[3:]]
+            continue
+        if combo_headers and len(parts) >= 3 + len(combo_headers):
+            model_name = parts[1]
+            size = parts[2].lower()
+            for idx, combo in enumerate(combo_headers):
+                time_str = parts[3 + idx]
+                secs = parse_duration_to_seconds(time_str)
+                if secs is not None:
+                    inference_dict[(model_name, size, combo)] = secs
+    return inference_dict
+
+
+def get_inference_seconds(inference_dict: dict, model_name: str, size: str, combo: str) -> float | None:
+    if not inference_dict:
+        return None
+    txt_name = MODEL_NAME_TO_TXT.get(model_name, model_name)
+    key = (txt_name, size.lower(), combo.lower())
+    if key in inference_dict:
+        return inference_dict[key]
+    cleaned_target = re.sub(r'^\d+_', '', model_name).lower()
+    for (m_txt, s_txt, c_txt), secs in inference_dict.items():
+        if s_txt == size.lower() and c_txt == combo.lower():
+            cleaned_txt = re.sub(r'^\d+_', '', m_txt).lower()
+            if cleaned_target == cleaned_txt or cleaned_target in cleaned_txt or cleaned_txt in cleaned_target:
+                return secs
+    return None
 
 @st.cache_data
 def load_metrics_data(base_dir: str):
@@ -70,11 +184,11 @@ st.set_page_config(page_title="ZS Model Dashboard", layout="wide")
 st.title("Energy Load Forecast Evaluation")
 metrics_dir = r"C:\Users\lsb-ps\Documents\predictions_overview_lean"
 master_dir = r"C:\Users\lsb-ps\Documents\VEA_Playground\zero_shot_data\08_zero_shot_output\master_data_imputed_with_cv.csv"
-
 if Path(metrics_dir).exists():
     df_metrics = load_metrics_data(metrics_dir)
     df_wilcoxon = load_wilcoxon_stats(metrics_dir)
     df_master = load_masterdata(master_dir)
+    df_inference_times = load_inference_times(metrics_dir)
     
     if not df_metrics.empty:
         if not df_master.empty and 'Sector_Label' in df_master.columns:
@@ -301,7 +415,7 @@ if Path(metrics_dir).exists():
             
             def create_line_chart(df, y_col):
                 chart = alt.Chart(df).mark_line(color=line_color, point=True).encode(
-                    x=alt.X('Combination:N', title='Combination Horizon'),
+                    x=alt.X('Combination:N', title='Forecast Combination'),
                     y=alt.Y(f'{y_col}:Q', title=f'{y_col}')
                 ).properties(width='container', height=400, title=f"{target_model} - {y_col} Across Horizons")
                 return apply_thesis_theme(chart)
@@ -310,6 +424,296 @@ if Path(metrics_dir).exists():
                 st.altair_chart(create_line_chart(plot_df, "rMAE (Median)"), use_container_width=True)
             with tab_smape:
                 st.altair_chart(create_line_chart(plot_df, "sMAPE (Median)"), use_container_width=True)
+
+
+        st.markdown("---")
+        # --- c2 vs. c3 Comparison Across Models ---
+        st.subheader("C2 vs. C3 Horizon Transition Analysis")
+        st.markdown(
+            "Direct comparison of model performance shifts between forecast combination **c2** and **c3** "
+            "on the full normal dataset across all available models."
+        )
+
+        df_c2_c3_norm = df_metrics[
+            (df_metrics['size_category'] == 'normal') &
+            (df_metrics['combo_prefix'].isin(['c2', 'c3']))
+        ].replace([float('inf'), float('-inf')], pd.NA)
+
+        models_c2 = set(df_c2_c3_norm[df_c2_c3_norm['combo_prefix'] == 'c2']['model_name'].unique())
+        models_c3 = set(df_c2_c3_norm[df_c2_c3_norm['combo_prefix'] == 'c3']['model_name'].unique())
+        common_c2_c3_models = sorted([m for m in models_c2.intersection(models_c3) if m not in BASELINE_MODELS])
+
+        if not common_c2_c3_models:
+            st.info("No models with both c2 and c3 availability found in the normal dataset.")
+        else:
+            smape_c2_c3_col = 'horizon_smape_median_median' if 'horizon_smape_median_median' in df_c2_c3_norm.columns else 'horizon_smape_median'
+            
+            df_c2_c3_filtered = df_c2_c3_norm[df_c2_c3_norm['model_name'].isin(common_c2_c3_models)]
+            
+            agg_c2_c3 = df_c2_c3_filtered.groupby(['model_name', 'combo_prefix']).agg({
+                'horizon_rmae_median': 'median',
+                smape_c2_c3_col: 'median'
+            }).reset_index()
+
+            agg_c2_c3.rename(columns={
+                'model_name': 'Model',
+                'combo_prefix': 'Combination',
+                'horizon_rmae_median': 'rMAE (Median)',
+                smape_c2_c3_col: 'sMAPE (Median)'
+            }, inplace=True)
+
+            def create_c2_c3_comparison_chart(df, metric_col, title_text, show_legend=True):
+                chart = alt.Chart(df).mark_line(
+                    point=alt.OverlayMarkDef(size=50)
+                ).encode(
+                    x=alt.X(
+                        'Combination:N',
+                        title='Forecast Combination',
+                        sort=['c2', 'c3'],
+                        axis=alt.Axis(labelAngle=0)
+                    ),
+                    y=alt.Y(
+                        f'{metric_col}:Q',
+                        title=metric_col,
+                        scale=alt.Scale(zero=False)
+                    ),
+                    color=alt.Color(
+                        'Model:N',
+                        title='Model',
+                        scale=alt.Scale(scheme='tableau20'),
+                        legend=alt.Legend(title='Model') if show_legend else None
+                    ),
+                    tooltip=[
+                        alt.Tooltip('Model:N', title='Model'),
+                        alt.Tooltip('Combination:N', title='Combination'),
+                        alt.Tooltip(f'{metric_col}:Q', title=metric_col, format='.4f')
+                    ]
+                ).properties(
+                    width='container',
+                    height=440,
+                    title=alt.TitleParams(
+                        text=title_text,
+                        anchor='middle',
+                        fontSize=18,
+                        offset=15,
+                        orient='top'
+                    )
+                )
+                return apply_thesis_theme(chart)
+
+            col_c2_c3_rmae, col_c2_c3_smape = st.columns(2)
+            with col_c2_c3_rmae:
+                rmae_chart = create_c2_c3_comparison_chart(
+                    agg_c2_c3,
+                    "rMAE (Median)",
+                    "rMAE c2 to c3 Transition",
+                    show_legend=False
+                )
+                st.altair_chart(rmae_chart, use_container_width=True)
+
+            with col_c2_c3_smape:
+                smape_chart = create_c2_c3_comparison_chart(
+                    agg_c2_c3,
+                    "sMAPE (Median)",
+                    "sMAPE c2 to c3 Transition",
+                    show_legend=True
+                )
+                st.altair_chart(smape_chart, use_container_width=True)
+
+            with st.expander("View c2 vs. c3 Transition Details"):
+                piv_rmae = agg_c2_c3.pivot(index='Model', columns='Combination', values='rMAE (Median)')
+                piv_smape = agg_c2_c3.pivot(index='Model', columns='Combination', values='sMAPE (Median)')
+                
+                table_c2_c3 = pd.DataFrame({
+                    'rMAE (c2)': piv_rmae['c2'],
+                    'rMAE (c3)': piv_rmae['c3'],
+                    'Δ rMAE (%)': ((piv_rmae['c3'] - piv_rmae['c2']) / piv_rmae['c2']) * 100,
+                    'sMAPE (c2)': piv_smape['c2'],
+                    'sMAPE (c3)': piv_smape['c3'],
+                    'Δ sMAPE (% pts)': piv_smape['c3'] - piv_smape['c2'],
+                    'Δ sMAPE (%)': ((piv_smape['c3'] - piv_smape['c2']) / piv_smape['c2']) * 100
+                })
+                st.dataframe(
+                    table_c2_c3.style.format({
+                        'rMAE (c2)': '{:.4f}',
+                        'rMAE (c3)': '{:.4f}',
+                        'Δ rMAE (%)': '{:+.2f}%',
+                        'sMAPE (c2)': '{:.2f}%',
+                        'sMAPE (c3)': '{:.2f}%',
+                        'Δ sMAPE (% pts)': '{:+.2f}% pts',
+                        'Δ sMAPE (%)': '{:+.2f}%',
+                    }),
+                    use_container_width=True
+                )
+
+
+        st.markdown("---")
+        # --- Cross-Combination Error vs. Inference Time Analysis ---
+        st.subheader("Cross-Combination Error vs. Inference Time Analysis")
+        st.markdown(
+            "Analyzes error metric progression across forecast combinations alongside model inference execution time."
+        )
+
+        time_col1, time_col2, time_col3, time_col4 = st.columns(4)
+        size_time = time_col1.selectbox("Select Size (Time Analysis)", all_sizes, key="size_time")
+
+        valid_combos_time = sorted(
+            df_metrics[df_metrics['size_category'] == size_time]['combo_prefix'].unique().tolist(),
+            key=lambda x: int(re.search(r'\d+', x).group()) if re.search(r'\d+', x) else x
+        )
+        selected_combos_time = time_col2.multiselect(
+            "Select Contained Combinations",
+            options=valid_combos_time,
+            default=valid_combos_time,
+            key="combos_time"
+        )
+
+        all_models_time = sorted(df_metrics[df_metrics['size_category'] == size_time]['model_name'].unique().tolist())
+        target_model_time = time_col3.selectbox("Select Model (Time Analysis)", all_models_time, key="model_time")
+
+        selected_metric_time = time_col4.selectbox(
+            "Select Error Metric",
+            ["rMAE (Median)", "sMAPE (Median)"],
+            key="metric_time"
+        )
+
+        if not selected_combos_time:
+            st.warning("Please select at least one combination.")
+        else:
+            combo_time_comparisons = []
+            for combo in selected_combos_time:
+                df_slice = df_metrics[
+                    (df_metrics['size_category'] == size_time) & 
+                    (df_metrics['combo_prefix'] == combo) & 
+                    (df_metrics['model_name'] == target_model_time)
+                ].replace([float('inf'), float('-inf')], pd.NA)
+
+                metric_val = pd.NA
+                if not df_slice.empty:
+                    if selected_metric_time == "rMAE (Median)":
+                        metric_val = df_slice['horizon_rmae_median'].median() if 'horizon_rmae_median' in df_slice.columns else pd.NA
+                    else:  # "sMAPE (Median)"
+                        if 'horizon_smape_median_median' in df_slice.columns:
+                            metric_val = df_slice['horizon_smape_median_median'].median()
+                        elif 'horizon_smape_median' in df_slice.columns:
+                            metric_val = df_slice['horizon_smape_median'].median()
+
+                inf_secs = get_inference_seconds(df_inference_times, target_model_time, size_time, combo)
+
+                # Compute average inference time per company (total run time divided by dataset size)
+                cohort_dataset_size = df_metrics[df_metrics['size_category'] == size_time]['id'].nunique()
+                n_companies = df_slice['id'].nunique() if not df_slice.empty and df_slice['id'].nunique() > 0 else cohort_dataset_size
+                avg_inf_secs = (inf_secs / n_companies) if (inf_secs is not None and n_companies > 0) else None
+
+                combo_time_comparisons.append({
+                    "Combination": combo,
+                    "metric_value": metric_val,
+                    "avg_time_per_company": avg_inf_secs,
+                    "total_run_time": inf_secs,
+                    "company_count": n_companies
+                })
+
+            if combo_time_comparisons:
+                df_plot_time = pd.DataFrame(combo_time_comparisons)
+                df_plot_time_valid = df_plot_time.dropna(subset=['metric_value'])
+
+                if df_plot_time_valid.empty:
+                    st.info(f"No metric data available for {target_model_time} across selected combinations.")
+                else:
+                    has_time_values = df_plot_time_valid['avg_time_per_company'].dropna().count() > 0
+
+                    metric_color = '#1f77b4'  # Steel Blue
+                    time_color = '#d62728'    # Crimson Red
+
+                    base_chart = alt.Chart(df_plot_time_valid).encode(
+                        x=alt.X('Combination:N', title='Forecast Combination', sort=selected_combos_time)
+                    )
+
+                    metric_line = base_chart.mark_line(
+                        color=metric_color,
+                        point=alt.OverlayMarkDef(color=metric_color, size=60)
+                    ).encode(
+                        y=alt.Y(
+                            'metric_value:Q',
+                            title=selected_metric_time,
+                            axis=alt.Axis(
+                                titleColor=metric_color,
+                                labelColor=metric_color,
+                                tickColor=metric_color
+                            )
+                        ),
+                        tooltip=[
+                            alt.Tooltip('Combination:N', title='Combination'),
+                            alt.Tooltip('metric_value:Q', title=selected_metric_time, format='.4f')
+                        ]
+                    )
+
+                    title_text_dual = f"{target_model_time} - {selected_metric_time} vs. Avg. Inference Time per Company ({size_time.title()})"
+                    title_text_single = f"{target_model_time} - {selected_metric_time} Across Horizons ({size_time.title()})"
+
+                    if has_time_values:
+                        time_df = df_plot_time_valid.dropna(subset=['avg_time_per_company'])
+                        time_line = alt.Chart(time_df).mark_line(
+                            color=time_color,
+                            point=alt.OverlayMarkDef(color=time_color, size=60)
+                        ).encode(
+                            x=alt.X('Combination:N', sort=selected_combos_time),
+                            y=alt.Y(
+                                'avg_time_per_company:Q',
+                                title='Avg. Inference Time / Industrial Site (s)',
+                                axis=alt.Axis(
+                                    titleColor=time_color,
+                                    labelColor=time_color,
+                                    tickColor=time_color,
+                                    orient='right',
+                                    grid=False
+                                )
+                            ),
+                            tooltip=[
+                                alt.Tooltip('Combination:N', title='Combination'),
+                                alt.Tooltip('avg_time_per_company:Q', title='Avg. Time / Company (s)', format='.4f'),
+                                alt.Tooltip('total_run_time:Q', title='Total Run Time (s)', format='.1f'),
+                                alt.Tooltip('company_count:Q', title='Dataset Size (Companies)', format=',.0f')
+                            ]
+                        )
+
+                        dual_chart = alt.layer(metric_line, time_line).resolve_scale(y='independent').resolve_axis(y='independent').properties(
+                            width='container',
+                            height=420,
+                            title=alt.TitleParams(
+                                text=title_text_dual,
+                                anchor='middle',
+                                fontSize=20,
+                                offset=15,
+                                orient='top'
+                            )
+                        )
+                        st.caption(f"🔵 **{selected_metric_time}** (Left axis) &nbsp;|&nbsp; 🔴 **Avg. Inference Time per Company (s)** (Right axis)")
+                        st.altair_chart(apply_thesis_theme(dual_chart), use_container_width=True)
+                    else:
+                        single_chart = metric_line.properties(
+                            width='container',
+                            height=420,
+                            title=alt.TitleParams(
+                                text=title_text_single,
+                                anchor='middle',
+                                fontSize=20,
+                                offset=15,
+                                orient='top'
+                            )
+                        )
+                        st.caption(f"🔵 **{selected_metric_time}** (Left axis)")
+                        st.altair_chart(apply_thesis_theme(single_chart), use_container_width=True)
+                        st.info(f"No inference time data found in 'inference_time_overview.txt' for {target_model_time} (Size: {size_time.title()}). Displaying metric line only.")
+
+                    with st.expander("View Data Details"):
+                        display_df = df_plot_time.rename(columns={
+                            'metric_value': selected_metric_time,
+                            'avg_time_per_company': 'Avg. Time per Company (s)',
+                            'total_run_time': 'Total Run Time (s)',
+                            'company_count': 'Dataset Size (Companies)'
+                        })
+                        st.dataframe(display_df.set_index('Combination'), use_container_width=True)
 
 
         st.markdown("---")
