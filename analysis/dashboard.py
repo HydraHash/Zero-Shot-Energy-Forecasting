@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import altair as alt
+import numpy as np
 import re
 from pathlib import Path
 
@@ -150,10 +151,11 @@ def load_masterdata(filepath: str):
         if 'Sector_group_id' in df_master.columns and 'Sector_group' in df_master.columns:
             df_master['Sector_Label'] = df_master['Sector_group_id'].astype(str) + ": " + df_master['Sector_group'].astype(str)
             
-        # CV is extracted if it exists
+        # CV and repeatability_score are extracted if they exist
         cols_to_keep = ['id']
         if 'Sector_Label' in df_master.columns: cols_to_keep.append('Sector_Label')
         if 'CV' in df_master.columns: cols_to_keep.append('CV')
+        if 'repeatability_score' in df_master.columns: cols_to_keep.append('repeatability_score')
             
         return df_master[cols_to_keep].drop_duplicates()
     return pd.DataFrame()
@@ -183,7 +185,7 @@ def apply_thesis_theme(chart):
 st.set_page_config(page_title="ZS Model Dashboard", layout="wide")
 st.title("Energy Load Forecast Evaluation")
 metrics_dir = r"C:\Users\lsb-ps\Documents\predictions_overview_lean"
-master_dir = r"C:\Users\lsb-ps\Documents\VEA_Playground\zero_shot_data\08_zero_shot_output\master_data_imputed_with_cv.csv"
+master_dir = r"C:\Users\lsb-ps\Documents\VEA_Playground\zero_shot_data\08_zero_shot_output\master_data_cv_repeat.csv"
 if Path(metrics_dir).exists():
     df_metrics = load_metrics_data(metrics_dir)
     df_wilcoxon = load_wilcoxon_stats(metrics_dir)
@@ -839,6 +841,202 @@ if Path(metrics_dir).exists():
             )
 
             st.altair_chart(apply_thesis_theme(export_chart), use_container_width=True)
+
+
+        st.markdown("---")
+        # --- Demand Repeatability vs. Model Performance ---
+        st.subheader("Demand Repeatability vs. Zero-Shot Competitiveness")
+        st.markdown(
+            "Evaluates whether Zero-Shot foundation models retain a comparative advantage over baseline models "
+            "across different levels of intraday load repeatability (erratic vs. rigid diurnal patterns)."
+        )
+
+        rep_col1, rep_col2, rep_col3 = st.columns(3)
+        size_rep = rep_col1.selectbox("Select Size (Repeatability)", all_sizes, key="size_rep")
+        valid_combos_rep = df_metrics[df_metrics['size_category'] == size_rep]['combo_prefix'].unique().tolist()
+        combo_rep = rep_col2.selectbox("Select Combination (Repeatability)", valid_combos_rep, key="combo_rep")
+        metric_rep_choice = rep_col3.selectbox(
+            "Select Evaluation Metric",
+            ["rMAE (Median)", "sMAPE (Median)"],
+            key="metric_rep"
+        )
+
+        if not df_master.empty and 'repeatability_score' in df_master.columns:
+            rep_slice = df_metrics[
+                (df_metrics['size_category'] == size_rep) &
+                (df_metrics['combo_prefix'] == combo_rep)
+            ].replace([float('inf'), float('-inf')], pd.NA)
+
+            # If repeatability_score already merged into df_metrics at top-level, reuse it; otherwise merge from df_master
+            if 'repeatability_score' in rep_slice.columns:
+                rep_merged = rep_slice.dropna(subset=['repeatability_score'])
+            else:
+                rep_merged = rep_slice.merge(df_master[['id', 'repeatability_score']], on='id', how='inner')
+                rep_merged = rep_merged.dropna(subset=['repeatability_score'])
+
+            if not rep_merged.empty:
+                raw_metric_col = 'horizon_rmae_median' if metric_rep_choice == "rMAE (Median)" else (
+                    'horizon_smape_median_median' if 'horizon_smape_median_median' in rep_merged.columns else 'horizon_smape_median'
+                )
+
+                rep_merged = rep_merged.dropna(subset=[raw_metric_col])
+                # Ensure ordered categorical tier labels
+                tier_order = ['Low (<0.6)', 'Medium (0.6-0.85)', 'High (>=0.85)']
+                rep_merged['tier'] = pd.cut(
+                    rep_merged['repeatability_score'],
+                    bins=[-np.inf, 0.60, 0.85, np.inf],
+                    labels=tier_order,
+                    ordered=True
+                )
+                rep_merged['is_baseline'] = rep_merged['model_name'].isin(BASELINE_MODELS)
+                rep_merged['model_type'] = rep_merged['is_baseline'].map({True: 'Baseline', False: 'Zero-Shot'})
+
+                # --- Plot 1: Performance Metric across Repeatability Tiers by Model ---
+                tier_agg = rep_merged.groupby(['model_name', 'tier', 'model_type'], observed=False)[raw_metric_col].median().reset_index()
+                tier_agg.rename(columns={raw_metric_col: 'Metric Value', 'model_name': 'Model', 'model_type': 'Model Type'}, inplace=True)
+                tier_agg['tier'] = pd.Categorical(tier_agg['tier'], categories=tier_order, ordered=True)
+
+                metric_tier_chart = alt.Chart(tier_agg).mark_circle(
+                    size=90,
+                    opacity=0.85
+                ).encode(
+                    x=alt.X(
+                        'tier:O',
+                        title='Intraday Repeatability Tier',
+                        sort=tier_order,
+                        scale=alt.Scale(domain=tier_order),
+                        axis=alt.Axis(labelAngle=-30)
+                    ),
+                    y=alt.Y('Metric Value:Q', title=metric_rep_choice, scale=alt.Scale(zero=False)),
+                    color=alt.Color(
+                        'Model Type:N',
+                        legend=None,
+                        scale=alt.Scale(
+                            domain=['Zero-Shot', 'Baseline'],
+                            range=['#1f77b4', '#ff7f0e']
+                        )
+                    ),
+                    tooltip=[
+                        alt.Tooltip('Model:N', title='Model'),
+                        alt.Tooltip('Model Type:N', title='Architecture'),
+                        alt.Tooltip('tier:N', title='Repeatability Tier'),
+                        alt.Tooltip('Metric Value:Q', title=metric_rep_choice, format='.4f')
+                    ]
+                ).properties(
+                    width='container',
+                    height=440,
+                    title=alt.TitleParams(
+                        text=f"{metric_rep_choice} across Intraday Repeatability Tiers (Size: {size_rep.title()} | {combo_rep.upper()})",
+                        anchor='middle',
+                        fontSize=18,
+                        offset=15,
+                        orient='top'
+                    )
+                )
+
+                # --- Plot 2: Zero-Shot vs. Baseline Win Share across Tiers ---
+                piv_wins = rep_merged.pivot_table(
+                    index=['id', 'tier'],
+                    columns='model_name',
+                    values=raw_metric_col,
+                    observed=False
+                )
+                best_model_per_company = piv_wins.idxmin(axis=1).reset_index(name='best_model')
+                best_model_per_company['Model Type'] = best_model_per_company['best_model'].apply(
+                    lambda x: 'Baseline' if x in BASELINE_MODELS else 'Zero-Shot'
+                )
+
+                win_shares = best_model_per_company.groupby(['tier', 'Model Type'], observed=False).size().reset_index(name='Company Wins')
+                tier_totals = win_shares.groupby('tier', observed=False)['Company Wins'].transform('sum')
+                win_shares['Win Share (%)'] = (win_shares['Company Wins'] / tier_totals) * 100
+                win_shares['tier'] = pd.Categorical(win_shares['tier'], categories=tier_order, ordered=True)
+
+                win_share_chart = alt.Chart(win_shares).mark_bar().encode(
+                    x=alt.X(
+                        'tier:O',
+                        title='Intraday Repeatability Tier',
+                        sort=tier_order,
+                        scale=alt.Scale(domain=tier_order),
+                        axis=alt.Axis(labelAngle=-30)
+                    ),
+                    y=alt.Y('Win Share (%):Q', title='Company Win Share (%)', scale=alt.Scale(domain=[0, 100])),
+                    color=alt.Color(
+                        'Model Type:N',
+                        title='Model Architecture',
+                        scale=alt.Scale(
+                            domain=['Zero-Shot', 'Baseline'],
+                            range=['#1f77b4', '#ff7f0e']
+                        )
+                    ),
+                    tooltip=[
+                        alt.Tooltip('tier:N', title='Repeatability Tier'),
+                        alt.Tooltip('Model Type:N', title='Architecture'),
+                        alt.Tooltip('Company Wins:Q', title='Wins (Count)'),
+                        alt.Tooltip('Win Share (%):Q', title='Win Share', format='.1f')
+                    ]
+                ).properties(
+                    width='container',
+                    height=440,
+                    title=alt.TitleParams(
+                        text=f"{combo_rep.upper()} Zero-Shot (blue) vs. Baseline (orange) sMAPE Win Share",
+                        anchor='middle',
+                        fontSize=18,
+                        offset=15,
+                        orient='top'
+                    )
+                )
+
+                col_rep1, col_rep2 = st.columns(2)
+                with col_rep1:
+                    st.altair_chart(apply_thesis_theme(metric_tier_chart), use_container_width=True)
+                    st.caption("🔵 **Zero-Shot models** &nbsp;|&nbsp; 🟠 **Baseline models**.")
+                with col_rep2:
+                    st.altair_chart(apply_thesis_theme(win_share_chart), use_container_width=True)
+                    st.caption("🔵 **Zero-Shot Models** &nbsp;|&nbsp; 🟠 **Baselines** (Company win determined by lowest error).")
+
+                # --- Plot 3: Scatter Correlation for Selected Model ---
+                with st.expander("Explore Continuous Correlation (Repeatability Score vs. Model Error)"):
+                    all_avail_models = sorted(rep_merged['model_name'].unique().tolist())
+                    selected_scatter_model = st.selectbox(
+                        "Select Model for Detailed Scatter Plot",
+                        all_avail_models,
+                        key="model_scatter_rep"
+                    )
+
+                    scatter_df = rep_merged[rep_merged['model_name'] == selected_scatter_model].dropna(
+                        subset=['repeatability_score', raw_metric_col]
+                    )
+
+                    if not scatter_df.empty:
+                        r_score = scatter_df['repeatability_score'].corr(scatter_df[raw_metric_col])
+                        st.info(f"**Pearson Correlation ($r$) for {selected_scatter_model}:** `{r_score:.4f}`")
+
+                        scatter_plot = alt.Chart(scatter_df).mark_circle(size=40, opacity=0.4, color='#1f77b4').encode(
+                            x=alt.X('repeatability_score:Q', title='Daily Repeatability Score (Pearson r across days)'),
+                            y=alt.Y(f'{raw_metric_col}:Q', title=metric_rep_choice),
+                            tooltip=['id', 'repeatability_score', alt.Tooltip(f'{raw_metric_col}:Q', format='.4f')]
+                        )
+                        trendline_rep = scatter_plot.transform_regression(
+                            'repeatability_score', raw_metric_col
+                        ).mark_line(color='#ff7f0e', strokeWidth=3)
+
+                        scatter_chart = (scatter_plot + trendline_rep).properties(
+                            width='container',
+                            height=450,
+                            title=alt.TitleParams(
+                                text=f"{selected_scatter_model}: {metric_rep_choice} vs. Daily Repeatability Score",
+                                anchor='middle',
+                                fontSize=18,
+                                offset=15,
+                                orient='top'
+                            )
+                        ).interactive()
+
+                        st.altair_chart(apply_thesis_theme(scatter_chart), use_container_width=True)
+            else:
+                st.warning("No matching metrics found for the selected combination and size.")
+        else:
+            st.error("The 'repeatability_score' column was not found in the master data.")
 
 
         st.markdown("---")
