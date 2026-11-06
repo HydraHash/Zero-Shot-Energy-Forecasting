@@ -1040,6 +1040,218 @@ if Path(metrics_dir).exists():
 
 
         st.markdown("---")
+        # --- Peak Penalty & Volatility: rMAE vs. rRMSE Scatter Quadrant ---
+        st.subheader("Peak Penalty & Outlier Volatility: rMAE vs. rRMSE")
+        st.markdown(
+            "Compares typical day-to-day error (**rMAE**) against peak and outlier error sensitivity (**rRMSE**, relative to Seasonal Naive). "
+            "Models above the diagonal line ($y = x$) suffer from a disproportionate **Peak Penalty** (catastrophic spike misses despite good average tracking), "
+            "while models in the bottom-left corner excel at both general load forecasting and peak resilience."
+        )
+
+        peak_col1, peak_col2 = st.columns(2)
+        size_peak = peak_col1.selectbox("Select Size (Peak Penalty)", all_sizes, key="size_peak")
+        valid_combos_peak = df_metrics[df_metrics['size_category'] == size_peak]['combo_prefix'].unique().tolist()
+        combo_peak = peak_col2.selectbox("Select Combination (Peak Penalty)", valid_combos_peak, key="combo_peak")
+
+        df_peak = df_metrics[
+            (df_metrics['size_category'] == size_peak) &
+            (df_metrics['combo_prefix'] == combo_peak)
+        ].replace([float('inf'), float('-inf')], pd.NA).dropna(subset=['horizon_rmse_median', 'horizon_rmae_median'])
+
+        if df_peak.empty or 'SeasonNaive' not in df_peak['model_name'].values:
+            st.warning("Insufficient metric data or SeasonNaive baseline missing for this combination.")
+        else:
+            sn_peak = df_peak[df_peak['model_name'] == 'SeasonNaive'][['id', 'horizon_rmse_median']].rename(
+                columns={'horizon_rmse_median': 'sn_rmse'}
+            )
+            df_peak_merged = df_peak.merge(sn_peak, on='id', how='inner')
+            df_peak_merged['rRMSE'] = df_peak_merged['horizon_rmse_median'] / df_peak_merged['sn_rmse']
+            df_peak_merged['rMAE'] = df_peak_merged['horizon_rmae_median']
+
+            peak_agg = df_peak_merged.groupby('model_name').agg({
+                'rMAE': 'median',
+                'rRMSE': 'median'
+            }).reset_index()
+
+            peak_agg.rename(columns={'model_name': 'Model'}, inplace=True)
+            peak_agg['Architecture'] = peak_agg['Model'].apply(lambda x: 'Baseline' if x in BASELINE_MODELS else 'Zero-Shot')
+            peak_agg['Peak Penalty Ratio (rRMSE / rMAE)'] = peak_agg['rRMSE'] / peak_agg['rMAE']
+
+            # Fixed focused scale domains to zoom in on crowded competitive zone
+            min_x = 0.7
+            max_x = 1.8
+            min_y = 0.7
+            max_y = 1.9
+            diag_min = max(min_x, min_y)
+            diag_max = min(max_x, max_y)
+
+            # Mark and clip outliers at boundary for visual display while preserving exact values in tooltips
+            peak_agg['is_outlier'] = (peak_agg['rMAE'] > max_x) | (peak_agg['rRMSE'] > max_y) | (peak_agg['rMAE'] < min_x) | (peak_agg['rRMSE'] < min_y)
+            peak_agg['display_label'] = peak_agg['Model'] + peak_agg['is_outlier'].map({True: ' [clipped]', False: ''})
+            peak_agg['plot_rMAE'] = peak_agg['rMAE'].clip(lower=min_x, upper=max_x)
+            peak_agg['plot_rRMSE'] = peak_agg['rRMSE'].clip(lower=min_y, upper=max_y)
+
+            diag_line_df = pd.DataFrame({'plot_rMAE': [diag_min, diag_max], 'plot_rRMSE': [diag_min, diag_max]})
+            diag_line = alt.Chart(diag_line_df).mark_line(
+                color='#888888',
+                strokeDash=[5, 5],
+                strokeWidth=1.5
+            ).encode(
+                x=alt.X('plot_rMAE:Q', scale=alt.Scale(domain=[min_x, max_x])),
+                y=alt.Y('plot_rRMSE:Q', scale=alt.Scale(domain=[min_y, max_y]))
+            )
+
+            diag_label = alt.Chart(pd.DataFrame({'plot_rMAE': [diag_min + (diag_max - diag_min) * 0.70], 'plot_rRMSE': [diag_min + (diag_max - diag_min) * 0.74]})).mark_text(
+                text='Equilibrium (rRMSE = rMAE)',
+                color='#777777',
+                angle=45,
+                fontSize=11,
+                align='left'
+            ).encode(x='plot_rMAE:Q', y='plot_rRMSE:Q')
+
+            # Prominent bold reference lines at 1.0 for rMAE and rRMSE (Seasonal Naive baseline)
+            ref_x_df = pd.DataFrame({'plot_rMAE': [1.0]})
+            ref_x_rule = alt.Chart(ref_x_df).mark_rule(
+                color='#1f2937',
+                strokeWidth=2.2,
+                strokeDash=[5, 4]
+            ).encode(x='plot_rMAE:Q')
+
+            ref_y_df = pd.DataFrame({'plot_rRMSE': [1.0]})
+            ref_y_rule = alt.Chart(ref_y_df).mark_rule(
+                color='#1f2937',
+                strokeWidth=2.2,
+                strokeDash=[5, 4]
+            ).encode(y='plot_rRMSE:Q')
+
+            highlight_peak = alt.selection_point(fields=['Architecture'], bind='legend')
+
+            peak_scatter = alt.Chart(peak_agg).mark_circle(size=150, opacity=0.9).encode(
+                x=alt.X(
+                    'plot_rMAE:Q',
+                    title='Typical Day-to-Day Error: rMAE (Median)',
+                    scale=alt.Scale(domain=[min_x, max_x])
+                ),
+                y=alt.Y(
+                    'plot_rRMSE:Q',
+                    title='Peak & Outlier Error: rRMSE (Median)',
+                    scale=alt.Scale(domain=[min_y, max_y])
+                ),
+                color=alt.Color(
+                    'Architecture:N',
+                    title='Model Architecture',
+                    scale=alt.Scale(
+                        domain=['Zero-Shot', 'Baseline'],
+                        range=['#1f77b4', '#ff7f0e']
+                    )
+                ),
+                opacity=alt.condition(highlight_peak, alt.value(0.95), alt.value(0.15)),
+                tooltip=[
+                    alt.Tooltip('Model:N', title='Model'),
+                    alt.Tooltip('Architecture:N', title='Architecture'),
+                    alt.Tooltip('rMAE:Q', title='Actual rMAE (Median)', format='.4f'),
+                    alt.Tooltip('rRMSE:Q', title='Actual rRMSE (Median)', format='.4f'),
+                    alt.Tooltip('Peak Penalty Ratio (rRMSE / rMAE):Q', title='Peak Penalty Ratio', format='.3f')
+                ]
+            ).add_params(highlight_peak)
+
+            # Custom directional label placement for dense clusters
+            # Bolt9m (bottom-left), Bolt43m (top-left), Bolt21m (top-right), Chronos2 (top-left), Moirai20 (bottom-right)
+            label_pos_map = {
+                'Bolt9m': 'bottom-right',
+                'Bolt43m': 'bottom-right',
+                'Bolt21m': 'bottom-right',
+                'Chronos2': 'bottom-left',
+                'Moirai20': 'top-left',
+                'TSMixer': 'bottom-right',
+                'CNN': 'bottom-right',
+                'SeasonNaive': 'top-left'
+            }
+            peak_agg['label_pos'] = peak_agg['Model'].map(label_pos_map).fillna('right')
+
+            pos_styles = {
+                'top-left': {'align': 'right', 'baseline': 'bottom', 'dx': -9, 'dy': -6},
+                'top-right': {'align': 'left', 'baseline': 'bottom', 'dx': 9, 'dy': -8},
+                'bottom-left': {'align': 'right', 'baseline': 'top', 'dx': -9, 'dy': 6},
+                'bottom-right': {'align': 'left', 'baseline': 'top', 'dx': 9, 'dy': 8},
+                'right': {'align': 'left', 'baseline': 'middle', 'dx': 11, 'dy': 0}
+            }
+
+            label_layers = []
+            for pos_name, style in pos_styles.items():
+                pos_df = peak_agg[peak_agg['label_pos'] == pos_name]
+                if not pos_df.empty:
+                    # White halo layer
+                    halo = alt.Chart(pos_df).mark_text(
+                        align=style['align'],
+                        baseline=style['baseline'],
+                        dx=style['dx'],
+                        dy=style['dy'],
+                        fontSize=11,
+                        stroke='white',
+                        strokeWidth=3,
+                        strokeJoin='round'
+                    ).encode(
+                        x='plot_rMAE:Q',
+                        y='plot_rRMSE:Q',
+                        text='display_label:N',
+                        opacity=alt.condition(highlight_peak, alt.value(1.0), alt.value(0.15))
+                    )
+                    # Foreground crisp text layer
+                    text_layer = alt.Chart(pos_df).mark_text(
+                        align=style['align'],
+                        baseline=style['baseline'],
+                        dx=style['dx'],
+                        dy=style['dy'],
+                        fontSize=11,
+                        color='black'
+                    ).encode(
+                        x='plot_rMAE:Q',
+                        y='plot_rRMSE:Q',
+                        text='display_label:N',
+                        opacity=alt.condition(highlight_peak, alt.value(1.0), alt.value(0.15))
+                    )
+                    label_layers.extend([halo, text_layer])
+
+            quadrant_chart = alt.layer(
+                diag_line,
+                diag_label,
+                ref_x_rule,
+                ref_y_rule,
+                peak_scatter,
+                *label_layers
+            ).properties(
+                width='container',
+                height=580,
+                title=alt.TitleParams(
+                    text=f"Model Peak Penalty: rMAE vs. rRMSE ({combo_peak.upper()})",
+                    anchor='middle',
+                    fontSize=18,
+                    offset=15,
+                    orient='top'
+                )
+            ).interactive()
+
+            st.altair_chart(apply_thesis_theme(quadrant_chart), use_container_width=True)
+            st.caption(
+                "**Bottom-Left Quadrant (< 1.0, < 1.0):** Superior to SeasonNaive on both typical days and peak loads. &nbsp;|&nbsp; "
+                "**Above Diagonal ($y > x$):** Higher peak penalty. &nbsp;|&nbsp; "
+                "**Below Diagonal ($y < x$):** More resilient during severe spikes."
+            )
+
+            with st.expander("View Peak Penalty Metrics Table"):
+                display_peak_df = peak_agg.sort_values('Peak Penalty Ratio (rRMSE / rMAE)', ascending=False).set_index('Model')
+                st.dataframe(
+                    display_peak_df.style.format({
+                        'rMAE': '{:.4f}',
+                        'rRMSE': '{:.4f}',
+                        'Peak Penalty Ratio (rRMSE / rMAE)': '{:.3f}'
+                    }),
+                    use_container_width=True
+                )
+
+
+        st.markdown("---")
         # --- Predictability Distribution ---
         st.subheader("Predictability Distribution: Variance vs. Error Floor")
         st.markdown("Analyzes the correlation between inherent time-series volatility (CV) and the empirical lower bound of predictability (lowest achieved error).")
