@@ -139,6 +139,19 @@ def load_wilcoxon_stats(base_dir: str):
 
 
 @st.cache_data
+def load_seasonal_metrics(base_dir: str):
+    candidate_paths = [
+        Path(base_dir) / "seasonal_monthly_metrics.parquet",
+        Path(__file__).resolve().parent / "seasonal_monthly_metrics.parquet",
+        Path(r"C:\Users\lsb-ps\Documents\predictions_overview_lean\seasonal_monthly_metrics.parquet"),
+    ]
+    for p in candidate_paths:
+        if p.exists():
+            return pd.read_parquet(p, engine='pyarrow')
+    return pd.DataFrame()
+
+
+@st.cache_data
 def load_masterdata(filepath: str):
     master_path = Path(filepath)
     if master_path.exists():
@@ -151,8 +164,9 @@ def load_masterdata(filepath: str):
         if 'Sector_group_id' in df_master.columns and 'Sector_group' in df_master.columns:
             df_master['Sector_Label'] = df_master['Sector_group_id'].astype(str) + ": " + df_master['Sector_group'].astype(str)
             
-        # CV and repeatability_score are extracted if they exist
+        # Extract sector information, CV and repeatability_score if they exist
         cols_to_keep = ['id']
+        if 'Sector_group' in df_master.columns: cols_to_keep.append('Sector_group')
         if 'Sector_Label' in df_master.columns: cols_to_keep.append('Sector_Label')
         if 'CV' in df_master.columns: cols_to_keep.append('CV')
         if 'repeatability_score' in df_master.columns: cols_to_keep.append('repeatability_score')
@@ -191,6 +205,7 @@ if Path(metrics_dir).exists():
     df_wilcoxon = load_wilcoxon_stats(metrics_dir)
     df_master = load_masterdata(master_dir)
     df_inference_times = load_inference_times(metrics_dir)
+    df_seasonal = load_seasonal_metrics(metrics_dir)
     
     if not df_metrics.empty:
         if not df_master.empty and 'Sector_Label' in df_master.columns:
@@ -1249,6 +1264,781 @@ if Path(metrics_dir).exists():
                     }),
                     use_container_width=True
                 )
+
+
+        st.markdown("---")
+        # --- Trend Identification: Magnitude vs. Momentum (rMAE vs. Directional Accuracy) ---
+        st.subheader("Trend Identification: Magnitude vs. Momentum Trade-Off")
+        st.markdown(
+            "Analyzes whether models that achieve low magnitude error (**rMAE**, average load tracking) also capture "
+            "step-to-step ramping momentum (**Directional Accuracy / DA**). "
+            "The red horizontal dashed line at **50%** marks the random coin-flip threshold; the top-left green quadrant "
+            "highlights models achieving both superior amplitude precision ($< 1.0$) and positive directional foresight ($> 50%$). "
+            "Notice how token-quantized models (e.g. Chronos) trade off directional fidelity for level accuracy."
+        )
+
+        da_col1, da_col2 = st.columns(2)
+        size_da = da_col1.selectbox("Select Size (Trend Identification)", all_sizes, key="size_da")
+        valid_combos_da = df_metrics[df_metrics['size_category'] == size_da]['combo_prefix'].unique().tolist()
+        combo_da = da_col2.selectbox("Select Combination (Trend Identification)", valid_combos_da, key="combo_da")
+
+        df_da_slice = df_metrics[
+            (df_metrics['size_category'] == size_da) &
+            (df_metrics['combo_prefix'] == combo_da)
+        ].replace([float('inf'), float('-inf')], pd.NA).dropna(subset=['horizon_rmae_median', 'horizon_da_mean'])
+
+        if df_da_slice.empty:
+            st.warning("No Directional Accuracy or rMAE data available for this selection.")
+        else:
+            da_agg = df_da_slice.groupby('model_name').agg({
+                'horizon_rmae_median': 'median',
+                'horizon_da_mean': 'median'
+            }).reset_index()
+
+            da_agg.rename(columns={
+                'model_name': 'Model',
+                'horizon_rmae_median': 'rMAE',
+                'horizon_da_mean': 'DA'
+            }, inplace=True)
+
+            da_agg['Architecture'] = da_agg['Model'].apply(lambda x: 'Baseline' if x in BASELINE_MODELS else 'Zero-Shot')
+
+            min_da_x = 0.6
+            max_da_x = 2.0
+            min_da_y = 30.0
+            max_da_y = 56.0
+
+            # Mark and clip outliers at boundary while keeping actual values in tooltip
+            da_agg['is_outlier'] = (da_agg['rMAE'] > max_da_x) | (da_agg['rMAE'] < min_da_x) | (da_agg['DA'] > max_da_y) | (da_agg['DA'] < min_da_y)
+            da_agg['display_label'] = da_agg['Model'] + da_agg['is_outlier'].map({True: ' [clipped]', False: ''})
+            da_agg['plot_rMAE'] = da_agg['rMAE'].clip(lower=min_da_x, upper=max_da_x)
+            da_agg['plot_DA'] = da_agg['DA'].clip(lower=min_da_y, upper=max_da_y)
+
+            # Top-left green quadrant: rMAE < 1.0 (better than baseline) and DA > 50% (better than random guess)
+            green_rect_da_df = pd.DataFrame([{
+                'plot_rMAE': min_da_x,
+                'plot_rMAE2': 1.0,
+                'plot_DA': 50.0,
+                'plot_DA2': max_da_y
+            }])
+            green_rect_da = alt.Chart(green_rect_da_df).mark_rect(
+                color='#ffffff',
+                opacity=0.45
+            ).encode(
+                x=alt.X('plot_rMAE:Q', scale=alt.Scale(domain=[min_da_x, max_da_x])),
+                x2='plot_rMAE2:Q',
+                y=alt.Y('plot_DA:Q', scale=alt.Scale(domain=[min_da_y, max_da_y])),
+                y2='plot_DA2:Q'
+            )
+
+            # Reference line at rMAE = 1.0 (SeasonNaive level baseline)
+            ref_da_x = alt.Chart(pd.DataFrame({'plot_rMAE': [1.0]})).mark_rule(
+                color='#1f2937',
+                strokeWidth=2.2,
+                strokeDash=[5, 4]
+            ).encode(x='plot_rMAE:Q')
+
+            # Reference line at DA = 50.0% (Coin-flip / Random guess threshold)
+            ref_da_y = alt.Chart(pd.DataFrame({'plot_DA': [50.0]})).mark_rule(
+                color='#dc2626',
+                strokeWidth=2.0,
+                strokeDash=[4, 3]
+            ).encode(y='plot_DA:Q')
+
+            ref_da_y_label = alt.Chart(pd.DataFrame({'plot_rMAE': [2.05], 'plot_DA': [50.8]})).mark_text(
+                text='50% Random Guess Threshold',
+                color='#dc2626',
+                fontSize=11,
+                align='left'
+            ).encode(x='plot_rMAE:Q', y='plot_DA:Q')
+
+            highlight_da = alt.selection_point(fields=['Architecture'], bind='legend')
+
+            da_scatter = alt.Chart(da_agg).mark_circle(size=150, opacity=0.9).encode(
+                x=alt.X(
+                    'plot_rMAE:Q',
+                    title='Magnitude Error: rMAE (Median)',
+                    scale=alt.Scale(domain=[min_da_x, max_da_x])
+                ),
+                y=alt.Y(
+                    'plot_DA:Q',
+                    title='Momentum Accuracy: Directional Accuracy (%)',
+                    scale=alt.Scale(domain=[min_da_y, max_da_y])
+                ),
+                color=alt.Color(
+                    'Architecture:N',
+                    title='Model Architecture',
+                    scale=alt.Scale(
+                        domain=['Zero-Shot', 'Baseline'],
+                        range=['#1f77b4', '#ff7f0e']
+                    )
+                ),
+                opacity=alt.condition(highlight_da, alt.value(0.95), alt.value(0.15)),
+                tooltip=[
+                    alt.Tooltip('Model:N', title='Model'),
+                    alt.Tooltip('Architecture:N', title='Architecture'),
+                    alt.Tooltip('rMAE:Q', title='Actual rMAE (Median)', format='.4f'),
+                    alt.Tooltip('DA:Q', title='Actual DA (%)', format='.2f')
+                ]
+            ).add_params(highlight_da)
+
+            # Custom directional label offsets for crowded clusters
+            label_pos_map_da = {
+                'Bolt9m': 'bottom-left',
+                'Bolt43m': 'top-left',
+                'Bolt21m': 'top-right',
+                'Chronos2': 'top-left',
+                'TSMixer': 'bottom-right',
+                'CNN': 'top-right',
+                'Moirai20': 'top-left',
+                'Sundial': 'top-right',
+                'SeasonNaive': 'bottom-right',
+                'HistoricAvg': 'top-right'
+            }
+            da_agg['label_pos'] = da_agg['Model'].map(label_pos_map_da).fillna('right')
+
+            pos_styles_da = {
+                'top-left': {'align': 'right', 'baseline': 'bottom', 'dx': -9, 'dy': -6},
+                'top-right': {'align': 'left', 'baseline': 'bottom', 'dx': 9, 'dy': -8},
+                'bottom-left': {'align': 'right', 'baseline': 'top', 'dx': -9, 'dy': 6},
+                'bottom-right': {'align': 'left', 'baseline': 'top', 'dx': 9, 'dy': 8},
+                'right': {'align': 'left', 'baseline': 'middle', 'dx': 11, 'dy': 0}
+            }
+
+            da_label_layers = []
+            for pos_name, style in pos_styles_da.items():
+                p_df = da_agg[da_agg['label_pos'] == pos_name]
+                if not p_df.empty:
+                    halo_layer = alt.Chart(p_df).mark_text(
+                        align=style['align'],
+                        baseline=style['baseline'],
+                        dx=style['dx'],
+                        dy=style['dy'],
+                        fontSize=11,
+                        stroke='white',
+                        strokeWidth=3,
+                        strokeJoin='round'
+                    ).encode(
+                        x='plot_rMAE:Q',
+                        y='plot_DA:Q',
+                        text='display_label:N',
+                        opacity=alt.condition(highlight_da, alt.value(1.0), alt.value(0.15))
+                    )
+                    txt_layer = alt.Chart(p_df).mark_text(
+                        align=style['align'],
+                        baseline=style['baseline'],
+                        dx=style['dx'],
+                        dy=style['dy'],
+                        fontSize=11,
+                        color='black'
+                    ).encode(
+                        x='plot_rMAE:Q',
+                        y='plot_DA:Q',
+                        text='display_label:N',
+                        opacity=alt.condition(highlight_da, alt.value(1.0), alt.value(0.15))
+                    )
+                    da_label_layers.extend([halo_layer, txt_layer])
+
+            da_quadrant_chart = alt.layer(
+                green_rect_da,
+                ref_da_x,
+                ref_da_y,
+                ref_da_y_label,
+                da_scatter,
+                *da_label_layers
+            ).properties(
+                width='container',
+                height=580,
+                title=alt.TitleParams(
+                    text=f"Trend Identification: rMAE vs. DA ({combo_da.upper()})",
+                    anchor='middle',
+                    fontSize=18,
+                    offset=15,
+                    orient='top'
+                )
+            ).interactive()
+
+            st.altair_chart(apply_thesis_theme(da_quadrant_chart), use_container_width=True)
+            st.caption(
+                "**Top-Left Quadrant (< 1.0 rMAE, > 50% DA):** Pareto-superior models capturing both accurate load levels and ramp directions. &nbsp;|&nbsp; "
+                "**Below 50% Line:** Negative directional tracking (e.g. quantization jitter in tokenized models). &nbsp;|&nbsp; "
+                "**Zero-Shot Models** &nbsp;|&nbsp;  **Baselines**."
+            )
+
+            with st.expander("View Trend Identification Metrics Table"):
+                display_da_df = da_agg.sort_values('DA', ascending=False).set_index('Model')
+                st.dataframe(
+                    display_da_df.style.format({
+                        'rMAE': '{:.4f}',
+                        'DA': '{:.2f}%'
+                    }),
+                    use_container_width=True
+                )
+
+
+        st.markdown("---")
+        # --- Sector Predictability & Architecture Comparison ---
+        st.subheader("Sector Predictability: Zero-Shot vs. Baseline Across Industry Archetypes")
+        st.markdown(
+            "Evaluates industrial load predictability across all economic sectors. Each sector is classified into "
+            "one of three predictability classes (**Low**, **Medium**, or **High Predictability**) based on its empirical "
+            "accuracy ceiling ($\text{Forecast Accuracy } (%) = 100% - \text{sMAPE}$). "
+            "The vertical bar chart compares the aggregate performance of **Zero-Shot Models** against **Baseline Models** "
+            "across the three classes (6 bars total), while the table below details the exact mapping of every industry sector."
+        )
+
+        sec_col1, sec_col2 = st.columns(2)
+        size_sec = sec_col1.selectbox("Select Size (Sector Predictability)", all_sizes, key="size_sec")
+        valid_combos_sec = df_metrics[df_metrics['size_category'] == size_sec]['combo_prefix'].unique().tolist()
+        combo_sec = sec_col2.selectbox("Select Combination (Sector Predictability)", valid_combos_sec, key="combo_sec")
+
+        if not df_master.empty and 'Sector_group' in df_master.columns:
+            df_sec_slice = df_metrics[
+                (df_metrics['size_category'] == size_sec) &
+                (df_metrics['combo_prefix'] == combo_sec)
+            ].replace([float('inf'), float('-inf')], pd.NA)
+
+            # Ensure Sector_group is available
+            if 'Sector_group' not in df_sec_slice.columns:
+                df_sec_slice = df_sec_slice.merge(df_master[['id', 'Sector_group']], on='id', how='inner')
+
+            smape_col_sec = 'horizon_smape_median_median' if 'horizon_smape_median_median' in df_sec_slice.columns else 'horizon_smape_median'
+            df_sec_slice = df_sec_slice.dropna(subset=[smape_col_sec, 'Sector_group'])
+
+            if df_sec_slice.empty:
+                st.warning("No sector metric data found for the selected combination.")
+            else:
+                df_sec_slice['Architecture'] = df_sec_slice['model_name'].apply(
+                    lambda x: 'Baseline Models' if x in BASELINE_MODELS else 'Zero-Shot Models'
+                )
+
+                # 1. Sector-level median per specific model
+                sector_model_medians = df_sec_slice.groupby(['Sector_group', 'model_name', 'Architecture'])[smape_col_sec].median().reset_index()
+
+                # Best Zero-Shot model per sector
+                zs_sector_df = sector_model_medians[sector_model_medians['Architecture'] == 'Zero-Shot Models']
+                best_zs_per_sector = zs_sector_df.loc[zs_sector_df.groupby('Sector_group')[smape_col_sec].idxmin()].rename(
+                    columns={'model_name': 'Best Zero-Shot Model', smape_col_sec: 'zs_smape'}
+                )
+                best_zs_per_sector['Zero-Shot Accuracy (%)'] = 100.0 - best_zs_per_sector['zs_smape']
+
+                # Best Baseline model per sector
+                base_sector_df = sector_model_medians[sector_model_medians['Architecture'] == 'Baseline Models']
+                best_base_per_sector = base_sector_df.loc[base_sector_df.groupby('Sector_group')[smape_col_sec].idxmin()].rename(
+                    columns={'model_name': 'Best Baseline Model', smape_col_sec: 'base_smape'}
+                )
+                best_base_per_sector['Baseline Accuracy (%)'] = 100.0 - best_base_per_sector['base_smape']
+
+                if not best_zs_per_sector.empty and not best_base_per_sector.empty:
+                    # Merge Zero-Shot and Baseline per sector
+                    sector_comp_table = best_zs_per_sector[['Sector_group', 'Best Zero-Shot Model', 'Zero-Shot Accuracy (%)']].merge(
+                        best_base_per_sector[['Sector_group', 'Best Baseline Model', 'Baseline Accuracy (%)']],
+                        on='Sector_group'
+                    )
+
+                    # Representative sector accuracy based strictly on the comparison of the two groups
+                    sector_comp_table['Sector Accuracy (%)'] = (sector_comp_table['Zero-Shot Accuracy (%)'] + sector_comp_table['Baseline Accuracy (%)']) / 2.0
+                    sector_comp_table['Zero-Shot Advantage (% pts)'] = sector_comp_table['Zero-Shot Accuracy (%)'] - sector_comp_table['Baseline Accuracy (%)']
+
+                    # Segment sectors into 3 classes based on the comparative accuracy level
+                    sector_comp_table['Predictability Class'] = pd.qcut(
+                        sector_comp_table['Sector Accuracy (%)'],
+                        q=3,
+                        labels=['Low Predictability', 'Medium Predictability', 'High Predictability']
+                    )
+
+                    # 2. Aggregate 6-bar data (median of sectors in each predictability class)
+                    class_bars = sector_comp_table.groupby('Predictability Class', observed=False).agg({
+                        'Zero-Shot Accuracy (%)': 'median',
+                        'Baseline Accuracy (%)': 'median'
+                    }).reset_index()
+
+                    df_six_bars = pd.DataFrame([
+                        {
+                            'Predictability Class': row['Predictability Class'],
+                            'Architecture': 'Zero-Shot Models',
+                            'Forecast Accuracy (%)': row['Zero-Shot Accuracy (%)']
+                        } for _, row in class_bars.iterrows()
+                    ] + [
+                        {
+                            'Predictability Class': row['Predictability Class'],
+                            'Architecture': 'Baseline Models',
+                            'Forecast Accuracy (%)': row['Baseline Accuracy (%)']
+                        } for _, row in class_bars.iterrows()
+                    ])
+
+                    class_order = ['Low Predictability', 'Medium Predictability', 'High Predictability']
+                    df_six_bars['Predictability Class'] = pd.Categorical(df_six_bars['Predictability Class'], categories=class_order, ordered=True)
+
+                    bars = alt.Chart(df_six_bars).mark_bar(
+                        cornerRadiusTopLeft=4,
+                        cornerRadiusTopRight=4
+                    ).encode(
+                        x=alt.X(
+                            'Predictability Class:O',
+                            sort=class_order,
+                            title='Sector Predictability Class',
+                            axis=alt.Axis(labelAngle=0, labelFontSize=13, titleFontSize=15)
+                        ),
+                        xOffset=alt.XOffset('Architecture:N', sort=['Zero-Shot Models', 'Baseline Models']),
+                        y=alt.Y(
+                            'Forecast Accuracy (%):Q',
+                            scale=alt.Scale(domain=[0.0, 105.0]),
+                            title='Median Forecast Accuracy (100 - sMAPE %)',
+                            axis=alt.Axis(labelFontSize=13, titleFontSize=15)
+                        ),
+                        color=alt.Color(
+                            'Architecture:N',
+                            title='Model Architecture',
+                            scale=alt.Scale(
+                                domain=['Zero-Shot Models', 'Baseline Models'],
+                                range=['#1f77b4', '#ff7f0e']
+                            )
+                        ),
+                        tooltip=[
+                            alt.Tooltip('Predictability Class:N', title='Class'),
+                            alt.Tooltip('Architecture:N', title='Architecture'),
+                            alt.Tooltip('Forecast Accuracy (%):Q', title='Accuracy (%)', format='.2f')
+                        ]
+                    )
+
+                    bar_text = alt.Chart(df_six_bars).mark_text(
+                        align='center',
+                        baseline='bottom',
+                        dy=-6,
+                        fontSize=13,
+                        fontWeight='bold',
+                        color='black'
+                    ).encode(
+                        x=alt.X('Predictability Class:O', sort=class_order),
+                        xOffset=alt.XOffset('Architecture:N', sort=['Zero-Shot Models', 'Baseline Models']),
+                        y=alt.Y('Forecast Accuracy (%):Q', scale=alt.Scale(domain=[0.0, 105.0])),
+                        text=alt.Text('Forecast Accuracy (%):Q', format='.1f')
+                    )
+
+                    six_bar_chart = (bars + bar_text).properties(
+                        width='container',
+                        height=500,
+                        title=alt.TitleParams(
+                            text=f"Zero-Shot vs. Baseline Accuracy across Predictability Classes (Size: {size_sec.title()} | {combo_sec.upper()})",
+                            anchor='middle',
+                            fontSize=18,
+                            offset=15,
+                            orient='top'
+                        )
+                    )
+
+                    st.altair_chart(apply_thesis_theme(six_bar_chart), use_container_width=True)
+                    st.caption(
+                        "🔵 **Zero-Shot Models** &nbsp;|&nbsp; 🟠 **Baseline Models**. "
+                        "Bars display the median forecast accuracy of companies within each predictability class. "
+                        "Notice the performance advantage of zero-shot models in the **Low Predictability** class."
+                    )
+
+                    # Table displaying sector correspondence with specific best model names
+                    st.markdown("##### Sector Predictability Classification & Best Model Mapping")
+                    disp_mapping = sector_comp_table[[
+                        'Sector_group',
+                        'Predictability Class',
+                        'Best Zero-Shot Model',
+                        'Zero-Shot Accuracy (%)',
+                        'Best Baseline Model',
+                        'Baseline Accuracy (%)',
+                        'Zero-Shot Advantage (% pts)'
+                    ]].rename(columns={
+                        'Sector_group': 'Economic Sector',
+                        'Zero-Shot Accuracy (%)': 'Best Zero-Shot Accuracy',
+                        'Baseline Accuracy (%)': 'Best Baseline Accuracy',
+                        'Zero-Shot Advantage (% pts)': 'Δ Zero-Shot Advantage'
+                    }).sort_values(
+                        ['Predictability Class', 'Best Zero-Shot Accuracy'],
+                        ascending=[True, False]
+                    ).set_index('Economic Sector')
+
+                    st.dataframe(
+                        disp_mapping.style.format({
+                            'Best Zero-Shot Accuracy': '{:.2f}%',
+                            'Best Baseline Accuracy': '{:.2f}%',
+                            'Δ Zero-Shot Advantage': '{:+.2f}% pts'
+                        }),
+                        use_container_width=True
+                    )
+                else:
+                    st.warning("Could not evaluate both Zero-Shot and Baseline models for this combination.")
+        else:
+            st.error("Sector metadata ('Sector_group') not found in master data.")
+
+
+        st.markdown("---")
+        # --- Seasonal & Monthly Predictability ---
+        st.subheader("Seasonal & Monthly Predictability: Zero-Shot vs. Baselines")
+        st.markdown(
+            "Evaluates whether specific calendar seasons or months are systematically more predictable than others, "
+            "and how **Zero-Shot Foundation Models** compare directly against **Baseline Models** across the year."
+        )
+
+        if not df_seasonal.empty:
+            seas_ctrl1, seas_ctrl2, seas_ctrl3 = st.columns([1, 1, 1.2])
+            size_seas = seas_ctrl1.selectbox("Select Size (Seasonal)", all_sizes, key="size_seas")
+
+            valid_combos_seas = df_seasonal[df_seasonal['size'] == size_seas]['combo'].unique().tolist()
+            combo_seas = seas_ctrl2.selectbox("Select Combination (Seasonal)", valid_combos_seas, key="combo_seas")
+
+            metric_choice = seas_ctrl3.radio(
+                "Evaluation Metric",
+                ["Absolute Error (Median MAE)", "Relative Error to SeasonNaive (Median rMAE)"],
+                horizontal=True,
+                key="metric_seas"
+            )
+            is_rmae = "rMAE" in metric_choice
+            metric_col = 'median_rmae' if is_rmae else 'median_mae'
+            metric_title = "Median rMAE (relative to SeasonNaive)" if is_rmae else "Median MAE (kW)"
+
+            MONTH_NAMES_MAP = {
+                1: 'Jan', 2: 'Feb', 3: 'Mar', 4: 'Apr',
+                5: 'May', 6: 'Jun', 7: 'Jul', 8: 'Aug',
+                9: 'Sep', 10: 'Oct', 11: 'Nov', 12: 'Dec'
+            }
+            MONTH_TO_SEASON_MAP = {
+                12: 'Winter', 1: 'Winter', 2: 'Winter',
+                3: 'Spring', 4: 'Spring', 5: 'Spring',
+                6: 'Summer', 7: 'Summer', 8: 'Summer',
+                9: 'Autumn', 10: 'Autumn', 11: 'Autumn'
+            }
+
+            seas_slice = df_seasonal[(df_seasonal['size'] == size_seas) & (df_seasonal['combo'] == combo_seas)].copy()
+
+            # Clean baseline & zero-shot comparison pair
+            active_models = ['Top Zero-Shot (Chronos/Bolt/Moirai)', 'Top Baseline (SeasonNaive/TSMixer)']
+            label_mapping = {
+                'Top Zero-Shot (Chronos/Bolt/Moirai)': 'Zero-Shot Models',
+                'Top Baseline (SeasonNaive/TSMixer)': 'Baseline Models'
+            }
+
+            # Seasonal display mode toggle
+            seas_mode = st.radio(
+                "Seasonal Representation on 12-Month Grid",
+                [
+                    "Seasonal Trend Line (Dashed Line connecting Season Midpoints)",
+                    "Seasonal Plateau Steps (Horizontal Segments spanning each 3-Month Season)"
+                ],
+                horizontal=True,
+                key="seas_display_mode"
+            )
+
+            # -------------------------------------------------------------
+            # Unified Chart: 12-Month & 4-Season Predictability Grid
+            # -------------------------------------------------------------
+            month_order = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+            # 1. Monthly Scatter & Line Data
+            df_m = seas_slice[
+                (seas_slice['granularity'] == 'Monthly') &
+                (seas_slice['model_name'].isin(active_models))
+            ].copy()
+            df_m['Architecture_Label'] = df_m['model_name'].map(label_mapping)
+            df_m['Series_Type'] = df_m['Architecture_Label'] + ' (Monthly)'
+            df_m['period_label'] = pd.Categorical(df_m['period_label'], categories=month_order, ordered=True)
+
+            # 2. Seasonal Scatter & Line Data
+            s_raw = seas_slice[
+                (seas_slice['granularity'] == 'Seasonal') &
+                (seas_slice['model_name'].isin(active_models))
+            ].copy()
+
+            chart_layers = []
+
+            if "Trend Line" in seas_mode:
+                # Mode A: Seasonal midpoints connected across the calendar year
+                # Winter mapped to Jan (and Dec), Spring to Apr, Summer to Jul, Autumn to Oct
+                season_midpoints = [
+                    ('Winter', 'Jan'),
+                    ('Spring', 'Apr'),
+                    ('Summer', 'Jul'),
+                    ('Autumn', 'Oct'),
+                    ('Winter', 'Dec')
+                ]
+                s_rows = []
+                for s_name, m_label in season_midpoints:
+                    for m_name in active_models:
+                        row_match = s_raw[(s_raw['model_name'] == m_name) & (s_raw['period_label'] == s_name)]
+                        if not row_match.empty:
+                            row = row_match.iloc[0]
+                            val_fmt = f"{row[metric_col]:.2f}" if is_rmae else f"{row[metric_col]:.1f}"
+                            s_rows.append({
+                                'period_label': m_label,
+                                'season': s_name,
+                                'model_name': m_name,
+                                'Architecture_Label': label_mapping[m_name],
+                                'Series_Type': label_mapping[m_name] + ' (Seasonal)',
+                                'label_text': f"{s_name}: {val_fmt}",
+                                metric_col: row[metric_col]
+                            })
+                df_s = pd.DataFrame(s_rows)
+                df_s['period_label'] = pd.Categorical(df_s['period_label'], categories=month_order, ordered=True)
+
+                # Compute dynamic Y scale (starting at 8 for MAE, or 0.0 with headroom for rMAE)
+                max_val_y = float(max(df_m[metric_col].max(), df_s[metric_col].max()) * 1.08)
+                if is_rmae:
+                    max_val_y = max(max_val_y, 1.15)
+                    y_scale = alt.Scale(domain=[0.0, max_val_y])
+                else:
+                    y_scale = alt.Scale(domain=[8.0, max_val_y], zero=False)
+
+                line_seasonal = alt.Chart(df_s).mark_line(
+                    strokeDash=[6, 4],
+                    strokeWidth=2.5,
+                    point=alt.OverlayMarkDef(shape='diamond', filled=True, size=150)
+                ).encode(
+                    x=alt.X('period_label:O', sort=month_order),
+                    y=alt.Y(f'{metric_col}:Q', scale=y_scale),
+                    color=alt.Color('Architecture_Label:N', scale=alt.Scale(domain=['Zero-Shot Models', 'Baseline Models'], range=['#1f77b4', '#ff7f0e'])),
+                    tooltip=[
+                        alt.Tooltip('season:N', title='Season'),
+                        alt.Tooltip('period_label:N', title='Calendar Month Position'),
+                        alt.Tooltip('Architecture_Label:N', title='Architecture'),
+                        alt.Tooltip(f'{metric_col}:Q', title=f'Seasonal {metric_title}', format='.2f')
+                    ]
+                )
+
+                # Text label above seasonal diamonds
+                text_seasonal = alt.Chart(df_s).mark_text(
+                    align='center',
+                    baseline='bottom',
+                    dy=-12,
+                    fontSize=11,
+                    fontWeight='bold'
+                ).encode(
+                    x=alt.X('period_label:O', sort=month_order),
+                    y=alt.Y(f'{metric_col}:Q', scale=y_scale),
+                    text=alt.Text('label_text:N'),
+                    color=alt.Color('Architecture_Label:N', scale=alt.Scale(domain=['Zero-Shot Models', 'Baseline Models'], range=['#1f77b4', '#ff7f0e']))
+                )
+                chart_layers.extend([line_seasonal, text_seasonal])
+
+            else:
+                # Mode B: Stepped horizontal plateau segments across each season's 3-month window
+                season_segments = [
+                    ('Winter_1', 'Winter', ['Jan', 'Feb']),
+                    ('Spring', 'Spring', ['Mar', 'Apr', 'May']),
+                    ('Summer', 'Summer', ['Jun', 'Jul', 'Aug']),
+                    ('Autumn', 'Autumn', ['Sep', 'Oct', 'Nov']),
+                    ('Winter_2', 'Winter', ['Dec'])
+                ]
+                s_step_rows = []
+                for seg_id, s_name, months in season_segments:
+                    for m_label in months:
+                        for m_name in active_models:
+                            row_match = s_raw[(s_raw['model_name'] == m_name) & (s_raw['period_label'] == s_name)]
+                            if not row_match.empty:
+                                row = row_match.iloc[0]
+                                val_fmt = f"{row[metric_col]:.2f}" if is_rmae else f"{row[metric_col]:.1f}"
+                                s_step_rows.append({
+                                    'period_label': m_label,
+                                    'season': s_name,
+                                    'seg_id': f"{seg_id}_{m_name}",
+                                    'model_name': m_name,
+                                    'Architecture_Label': label_mapping[m_name],
+                                    'Series_Type': label_mapping[m_name] + ' (Seasonal)',
+                                    'is_center': m_label in ['Jan', 'Apr', 'Jul', 'Oct'],
+                                    'label_text': f"{s_name}: {val_fmt}",
+                                    metric_col: row[metric_col]
+                                })
+                df_step = pd.DataFrame(s_step_rows)
+                df_step['period_label'] = pd.Categorical(df_step['period_label'], categories=month_order, ordered=True)
+
+                # Compute dynamic Y scale (starting at 8 for MAE, or 0.0 with headroom for rMAE)
+                max_val_y = float(max(df_m[metric_col].max(), df_step[metric_col].max()) * 1.08)
+                if is_rmae:
+                    max_val_y = max(max_val_y, 1.15)
+                    y_scale = alt.Scale(domain=[0.0, max_val_y])
+                else:
+                    y_scale = alt.Scale(domain=[8.0, max_val_y], zero=False)
+
+                line_plateau = alt.Chart(df_step).mark_line(
+                    strokeDash=[5, 3],
+                    strokeWidth=3,
+                    point=alt.OverlayMarkDef(shape='diamond', filled=True, size=110)
+                ).encode(
+                    x=alt.X('period_label:O', sort=month_order),
+                    y=alt.Y(f'{metric_col}:Q', scale=y_scale),
+                    detail='seg_id:N',
+                    color=alt.Color('Architecture_Label:N', scale=alt.Scale(domain=['Zero-Shot Models', 'Baseline Models'], range=['#1f77b4', '#ff7f0e'])),
+                    tooltip=[
+                        alt.Tooltip('season:N', title='Season'),
+                        alt.Tooltip('period_label:N', title='Month'),
+                        alt.Tooltip('Architecture_Label:N', title='Architecture'),
+                        alt.Tooltip(f'{metric_col}:Q', title=f'Seasonal {metric_title}', format='.2f')
+                    ]
+                )
+
+                # Text label at season center
+                text_plateau = alt.Chart(df_step[df_step['is_center'] == True]).mark_text(
+                    align='center',
+                    baseline='bottom',
+                    dy=-12,
+                    fontSize=13,
+                    fontWeight='bold'
+                ).encode(
+                    x=alt.X('period_label:O', sort=month_order),
+                    y=alt.Y(f'{metric_col}:Q', scale=y_scale),
+                    text=alt.Text('label_text:N'),
+                    color=alt.Color('Architecture_Label:N', scale=alt.Scale(domain=['Zero-Shot Models', 'Baseline Models'], range=['#1f77b4', '#ff7f0e']))
+                )
+                chart_layers.extend([line_plateau, text_plateau])
+
+            # Monthly line and scatter layer (solid line + circular points)
+            line_monthly = alt.Chart(df_m).mark_line(
+                point=alt.OverlayMarkDef(shape='circle', filled=True, size=75),
+                strokeWidth=2.5
+            ).encode(
+                x=alt.X(
+                    'period_label:O',
+                    sort=month_order,
+                    title='Calendar Month (Mapped into 4 Seasons)',#: Winter [Dec–Feb] | Spring [Mar–May] | Summer [Jun–Aug] | Autumn [Sep–Nov])',
+                    axis=alt.Axis(labelAngle=0, labelFontSize=13, titleFontSize=14)
+                ),
+                y=alt.Y(
+                    f'{metric_col}:Q',
+                    scale=y_scale,
+                    title=metric_title,
+                    axis=alt.Axis(labelFontSize=13, titleFontSize=15)
+                ),
+                color=alt.Color(
+                    'Architecture_Label:N',
+                    title='Model Architecture',
+                    scale=alt.Scale(
+                        domain=['Zero-Shot Models', 'Baseline Models'],
+                        range=['#1f77b4', '#ff7f0e']
+                    )
+                ),
+                tooltip=[
+                    alt.Tooltip('period_label:N', title='Month'),
+                    alt.Tooltip('season:N', title='Season'),
+                    alt.Tooltip('Architecture_Label:N', title='Architecture'),
+                    alt.Tooltip(f'{metric_col}:Q', title=f'Monthly {metric_title}', format='.2f')
+                ]
+            )
+            chart_layers.insert(0, line_monthly)
+
+            if metric_col == 'median_rmae':
+                sn_ref_rule = alt.Chart(pd.DataFrame({'y': [1.0]})).mark_rule(
+                    strokeDash=[6, 4],
+                    strokeWidth=2,
+                    color='#7f7f7f'
+                ).encode(y='y:Q')
+                chart_layers.append(sn_ref_rule)
+
+            integrated_chart = alt.layer(*chart_layers).properties(
+                width='container',
+                height=480,
+                title=alt.TitleParams(
+                    text=f"Seasonal & Monthly Predictability: Zero-Shot vs. Baseline ({combo_seas.upper()})",
+                    anchor='middle',
+                    fontSize=18,
+                    offset=15,
+                    orient='top'
+                )
+            )
+
+            st.altair_chart(apply_thesis_theme(integrated_chart), use_container_width=True)
+            st.caption(
+                "📈 **Solid Line + Circles (●)**: Monthly error progression across the 12 calendar months. &nbsp;|&nbsp; "
+                "📊 **Dashed Line + Diamonds (◆)**: Four Seasons aggregate baseline level (Winter, Spring, Summer, Autumn).<br>"
+                "🔵 **Zero-Shot Models** &nbsp;|&nbsp; 🟠 **Baseline Models**.",
+                unsafe_allow_html=True
+            )
+
+            # -------------------------------------------------------------
+            # Table: Monthly & Seasonal Predictability Breakdown
+            # -------------------------------------------------------------
+            st.markdown("##### Monthly & Seasonal Predictability Breakdown")
+
+            monthly_all = seas_slice[seas_slice['granularity'] == 'Monthly'].copy()
+            macro_names = ['Zero-Shot Aggregate', 'Baseline Aggregate', 'Top Zero-Shot (Chronos/Bolt/Moirai)', 'Top Baseline (SeasonNaive/TSMixer)']
+            indiv_models = monthly_all[~monthly_all['model_name'].isin(macro_names)]
+
+            table_rows = []
+            for m_num in range(1, 13):
+                m_label = MONTH_NAMES_MAP[m_num]
+                s_label = MONTH_TO_SEASON_MAP[m_num]
+
+                zs_row = monthly_all[(monthly_all['period_num'] == m_num) & (monthly_all['model_name'] == active_models[0])]
+                base_row = monthly_all[(monthly_all['period_num'] == m_num) & (monthly_all['model_name'] == active_models[1])]
+
+                zs_val = zs_row[metric_col].values[0] if not zs_row.empty else np.nan
+                base_val = base_row[metric_col].values[0] if not base_row.empty else np.nan
+
+                m_indiv = indiv_models[indiv_models['period_num'] == m_num]
+                best_zs_m = m_indiv[m_indiv['architecture'] == 'Zero-Shot'].sort_values(metric_col).iloc[0] if not m_indiv[m_indiv['architecture'] == 'Zero-Shot'].empty else None
+                best_base_m = m_indiv[m_indiv['architecture'] == 'Baseline'].sort_values(metric_col).iloc[0] if not m_indiv[m_indiv['architecture'] == 'Baseline'].empty else None
+
+                delta_abs = base_val - zs_val if (not pd.isna(base_val) and not pd.isna(zs_val)) else np.nan
+                rel_imp_pct = ((base_val - zs_val) / base_val * 100) if (not pd.isna(base_val) and base_val != 0) else np.nan
+
+                best_model_name = best_zs_m['model_name'] if (best_zs_m is not None and (best_base_m is None or best_zs_m[metric_col] <= best_base_m[metric_col])) else (best_base_m['model_name'] if best_base_m is not None else '-')
+
+                table_rows.append({
+                    'Month': f"{m_num:02d} - {m_label}",
+                    'Season': s_label,
+                    'Baseline': base_val,
+                    'Zero-Shot': zs_val,
+                    'Δ Advantage': delta_abs,
+                    'Improvement (%)': rel_imp_pct,
+                    'Best Overall Model': best_model_name
+                })
+
+            df_table = pd.DataFrame(table_rows)
+            df_table['Predictability Rank'] = df_table['Baseline'].rank(ascending=True, method='min').fillna(12).astype(int)
+            df_table = df_table[[
+                'Month', 'Season', 'Predictability Rank',
+                'Baseline', 'Zero-Shot', 'Δ Advantage', 'Improvement (%)',
+                'Best Overall Model'
+            ]].sort_values('Month').set_index('Month')
+
+            format_rules = {
+                'Baseline': '{:.2f}',
+                'Zero-Shot': '{:.2f}',
+                'Δ Advantage': '{:+.2f}',
+                'Improvement (%)': '{:+.2f}%',
+                'Predictability Rank': 'Rank {:d}'
+            }
+
+            st.dataframe(
+                df_table.style.format(format_rules),
+                use_container_width=True
+            )
+
+            # Four Seasons Aggregate Summary Table
+            st.markdown("###### Seasonal Summary (Four Seasons Aggregate)")
+            seasonal_all = seas_slice[seas_slice['granularity'] == 'Seasonal'].copy()
+            seas_table_rows = []
+            for s_name in ['Winter', 'Spring', 'Summer', 'Autumn']:
+                zs_s = seasonal_all[(seasonal_all['model_name'] == active_models[0]) & (seasonal_all['period_label'] == s_name)]
+                base_s = seasonal_all[(seasonal_all['model_name'] == active_models[1]) & (seasonal_all['period_label'] == s_name)]
+                z_val = zs_s[metric_col].values[0] if not zs_s.empty else np.nan
+                b_val = base_s[metric_col].values[0] if not base_s.empty else np.nan
+                d_val = b_val - z_val if (not pd.isna(b_val) and not pd.isna(z_val)) else np.nan
+                p_val = ((b_val - z_val) / b_val * 100) if (not pd.isna(b_val) and b_val != 0) else np.nan
+                seas_table_rows.append({
+                    'Season': s_name,
+                    'Baseline': b_val,
+                    'Zero-Shot': z_val,
+                    'Δ Advantage': d_val,
+                    'Improvement (%)': p_val
+                })
+            df_seas_table = pd.DataFrame(seas_table_rows).set_index('Season')
+            st.dataframe(
+                df_seas_table.style.format({
+                    'Baseline': '{:.2f}',
+                    'Zero-Shot': '{:.2f}',
+                    'Δ Advantage': '{:+.2f}',
+                    'Improvement (%)': '{:+.2f}%'
+                }),
+                use_container_width=True
+            )
+        else:
+            st.warning("Seasonal metrics file ('seasonal_monthly_metrics.parquet') not found.")
 
 
         st.markdown("---")
