@@ -37,18 +37,13 @@ def run_tirex_pipeline(batch_df, config, model):
         horizon_end_dt = batch_df.index[end_idx - 1]
         target_weekday_name = horizon_start_dt.strftime("%A")
         
-        # Slice features (context) and actual ground truth
         lag_block = batch_df.iloc[start_idx:origin_idx]
         actual_block = batch_df.iloc[origin_idx:end_idx]
         
-        # Extract inputs into a 2D PyTorch Tensor: [Batch, Lookback_Length]
         context_arrays = [lag_block[cid].values.ravel() for cid in batch_df.columns]
-        
-        # TiRex's auto moves batches to the model's device
         input_tensor = torch.tensor(np.array(context_arrays), dtype=torch.float32)
         
         with torch.no_grad():
-            # TiRex natively returns quantiles and a point forecast (mean)
             quantiles, means = model.forecast(
                 context=input_tensor, 
                 prediction_length=horizon_steps, 
@@ -56,7 +51,6 @@ def run_tirex_pipeline(batch_df, config, model):
                 output_type="numpy"
             )
             
-        # Map predictions back to the unified Parquet/TSV format
         for i, company_id in enumerate(batch_df.columns):
             y_actual_slice = actual_block[company_id].values.ravel().tolist()
             
