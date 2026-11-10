@@ -159,8 +159,8 @@ def process_combo_size(dataset, size: str, combo: str):
 
 
 def main():
-    raw_path = Path(r"C:\Users\lsb-ps\Documents\predictions_overview_lean\all_models_raw_mae.parquet")
-    out_dir = Path(r"C:\Users\lsb-ps\Documents\predictions_overview_lean")
+    raw_path = Path(r"path/to/predictions_overview_lean/all_models_raw_mae.parquet")
+    out_dir = Path(r"path/to/predictions_overview_lean")
     target_file = out_dir / "seasonal_monthly_metrics.parquet"
 
     print(f"Opening raw dataset at {raw_path}...")
@@ -183,7 +183,7 @@ def main():
     df_out.to_parquet(target_file, engine='pyarrow', index=False)
     print(f"File size: {round(target_file.stat().st_size / 1024, 2)} KB")
 
-    analysis_copy = Path(r"C:\Users\lsb-ps\Documents\zs_implementation\analysis\seasonal_monthly_metrics.parquet")
+    analysis_copy = Path(r"path/to/seasonal_monthly_metrics.parquet")
     df_out.to_parquet(analysis_copy, engine='pyarrow', index=False)
     print(f"Copied to {analysis_copy}")
 

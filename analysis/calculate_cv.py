@@ -90,7 +90,7 @@ calculate_and_append_cv = calculate_and_append_cv_and_repeatability
 
 if __name__ == "__main__":
     calculate_and_append_cv(
-        load_file=r'C:\Users\lsb-ps\Documents\VEA_Playground\zero_shot_data\08_zero_shot_output\load_profiles_enriched.tsv',
-        master_file=r'C:\Users\lsb-ps\Documents\VEA_Playground\zero_shot_data\08_zero_shot_output\master_data_imputed.csv',
-        output_file=r'C:\Users\lsb-ps\Documents\VEA_Playground\zero_shot_data\08_zero_shot_output\master_data_cv_repeat.csv'
+        load_file=r"path/to/load_profiles_enriched.tsv",
+        master_file=r"path/to/master_data_imputed.csv",
+        output_file=r"path/to/master_data_cv_repeat.csv"
     )

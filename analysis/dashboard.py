@@ -62,8 +62,8 @@ def load_inference_times(metrics_dir: str = "") -> dict:
         Path(__file__).resolve().parent / "execution_time_overview.txt",
         Path(metrics_dir) / "execution_time_overview.txt",
         Path(metrics_dir) / "inference_time_overview.txt",
-        Path(r"C:\Users\lsb-ps\Documents\zs_implementation\analysis\inference_time_overview.txt"),
-        Path(r"C:\Users\lsb-ps\Documents\predictions_overview_lean\execution_time_overview.txt"),
+        Path(r"path/to/inference_time_overview.txt"),
+        Path(r"path/to/execution_time_overview.txt"),
     ]
     target_file = None
     for p in candidate_paths:
@@ -131,7 +131,7 @@ def load_seasonal_metrics(base_dir: str):
     candidate_paths = [
         Path(base_dir) / "seasonal_monthly_metrics.parquet",
         Path(__file__).resolve().parent / "seasonal_monthly_metrics.parquet",
-        Path(r"C:\Users\lsb-ps\Documents\predictions_overview_lean\seasonal_monthly_metrics.parquet"),
+        Path(r"path/to/seasonal_monthly_metrics.parquet"),
     ]
     for p in candidate_paths:
         if p.exists():
@@ -176,7 +176,7 @@ def load_portfolio_metrics(metrics_dir: str):
     candidate_paths = [
         Path(metrics_dir) / "portfolio_aggregation_metrics.parquet",
         Path(__file__).resolve().parent / "portfolio_aggregation_metrics.parquet",
-        Path(r"C:\Users\lsb-ps\Documents\predictions_overview_lean\portfolio_aggregation_metrics.parquet"),
+        Path(r"path/to/portfolio_aggregation_metrics.parquet"),
     ]
     for p in candidate_paths:
         if p.exists():
@@ -207,9 +207,9 @@ def apply_thesis_theme(chart):
 
 st.set_page_config(page_title="ZS Model Dashboard", layout="wide")
 st.title("Energy Load Forecast Evaluation")
-metrics_dir = r"C:\Users\lsb-ps\Documents\predictions_overview_lean"
-master_dir = r"C:\Users\lsb-ps\Documents\VEA_Playground\zero_shot_data\08_zero_shot_output\master_data_cv_repeat.csv"
-features_dir = r"C:\Users\lsb-ps\Documents\FIM_research_data\02_features\loadprofile_features.csv"
+metrics_dir = r"path/to/predictions_overview_lean"
+master_dir = r"path/to/master_data_cv_repeat.csv"
+features_dir = r"path/to/loadprofile_features.csv"
 if Path(metrics_dir).exists():
     df_metrics = load_metrics_data(metrics_dir)
     df_master = load_masterdata(master_dir)

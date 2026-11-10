@@ -157,7 +157,7 @@ def load_vea_profiles(file_path) -> pd.DataFrame:
 
 
 if __name__ == "__main__":
-    DATA_PATH = r"S:\LSB-PS\zero_shot_data\08_zero_shot_output\load_profiles_enriched.tsv"
+    DATA_PATH = r"example\Path\data.tsv"
     BATCH_SIZE = 500
 
     logging.basicConfig(filename="triplec3_chronosBolt_log.txt",

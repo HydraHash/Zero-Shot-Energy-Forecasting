@@ -172,7 +172,7 @@ if __name__ == "__main__":
                         level=logging.INFO)
 
     loaded_profiles_df = load_vea_profiles(file_path=DATA_PATH)
-    train_profiles_df = load_train_dataset(TRAIN_DATA_PATH)0
+    train_profiles_df = load_train_dataset(TRAIN_DATA_PATH)
     company_ids = loaded_profiles_df.columns
     
     logging.info(f"\nStarting evaluation loop across {len(EXPERIMENTAL_COMBINATIONS)} configurations...")

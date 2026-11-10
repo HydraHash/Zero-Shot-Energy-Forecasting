@@ -506,9 +506,9 @@ def export_unified_wilcoxon_tests(
 
 
 if __name__ == "__main__":
-    PREDICTION_DIR = r"C:\Users\lsb-ps\Documents\predictions_overview_lean"
+    PREDICTION_DIR = r"path/to/predictions_overview_lean"
     MAE_FILE = Path(PREDICTION_DIR) / "all_models_raw_mae.parquet"
-    MASTERDATA_PATH = r"C:\Users\lsb-ps\Documents\VEA_Playground\zero_shot_data\08_zero_shot_output\master_data_imputed.csv"
+    MASTERDATA_PATH = r"path/to/master_data_imputed.csv"
 
     INVALID_IDS = [49, 401, 2325, 3425, 3986, 4297]
 
