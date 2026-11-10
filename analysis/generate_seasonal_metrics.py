@@ -45,7 +45,6 @@ def process_combo_size(dataset, size: str, combo: str):
     df['season'] = df['month'].map(MONTH_TO_SEASON)
     df['architecture'] = np.where(df['model_name'].isin(BASELINE_MODELS), 'Baseline', 'Zero-Shot')
 
-    # Merge SeasonNaive for rMAE
     sn = df[df['model_name'] == 'SeasonNaive'][['id', 'horizon_start', 'mae']].rename(columns={'mae': 'sn_mae'})
     if not sn.empty:
         df = df.merge(sn, on=['id', 'horizon_start'], how='left')
@@ -55,7 +54,6 @@ def process_combo_size(dataset, size: str, combo: str):
 
     records = []
 
-    # 1. Per-Model Monthly Aggregations
     monthly_grouped = df.groupby(['model_name', 'architecture', 'month', 'season'])
     for (m_name, arch, m_num, s_name), group in monthly_grouped:
         maes = group['mae'].dropna()
@@ -78,7 +76,6 @@ def process_combo_size(dataset, size: str, combo: str):
             'sample_count': int(len(group))
         })
 
-    # 2. Per-Model Seasonal Aggregations
     seasonal_grouped = df.groupby(['model_name', 'architecture', 'season'])
     for (m_name, arch, s_name), group in seasonal_grouped:
         maes = group['mae'].dropna()
@@ -101,8 +98,6 @@ def process_combo_size(dataset, size: str, combo: str):
             'sample_count': int(len(group))
         })
 
-    # 3. Macro Aggregates across Architectures:
-    # (a) All Zero-Shot, (b) All Baseline, (c) Top Zero-Shot, (d) Top Baseline
     macro_configs = [
         ('Zero-Shot Aggregate', 'Zero-Shot', df['architecture'] == 'Zero-Shot'),
         ('Baseline Aggregate', 'Baseline', df['architecture'] == 'Baseline'),
@@ -115,7 +110,6 @@ def process_combo_size(dataset, size: str, combo: str):
         if sub.empty:
             continue
 
-        # Monthly
         for m_num, m_group in sub.groupby('month'):
             maes = m_group['mae'].dropna()
             rmaes = m_group['rmae'].dropna()
@@ -138,7 +132,6 @@ def process_combo_size(dataset, size: str, combo: str):
                 'sample_count': int(len(m_group))
             })
 
-        # Seasonal
         for s_name, s_group in sub.groupby('season'):
             maes = s_group['mae'].dropna()
             rmaes = s_group['rmae'].dropna()
@@ -190,7 +183,6 @@ def main():
     df_out.to_parquet(target_file, engine='pyarrow', index=False)
     print(f"File size: {round(target_file.stat().st_size / 1024, 2)} KB")
 
-    # Also copy to analysis directory for easy local access
     analysis_copy = Path(r"C:\Users\lsb-ps\Documents\zs_implementation\analysis\seasonal_monthly_metrics.parquet")
     df_out.to_parquet(analysis_copy, engine='pyarrow', index=False)
     print(f"Copied to {analysis_copy}")
