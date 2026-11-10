@@ -21,13 +21,10 @@ MODEL_NAME_TO_TXT = {
     'Moirai20': '11_Moirai20',
     'TimerBase': '12_TimerBase',
     'LagLlama': '13_LagLLama',
-    'LagLLama': '13_LagLLama',
     'Tirex': '14_Tirex',
     'Kairos10m': '15_Kairos10',
     'Kairos23m': '16_Kairos23',
-    'kairos23m': '16_Kairos23',
     'Kairos50m': '17_Kairos50',
-    'kairos50m': '17_Kairos50',
     'Sundial': '18_Sundial128',
     'Bolt9m': '19_ChronosBolt9',
     'Bolt21m': '20_ChronosBolt21',
@@ -130,15 +127,6 @@ def load_metrics_data(base_dir: str):
 
 
 @st.cache_data
-def load_wilcoxon_stats(base_dir: str):
-    base_path = Path(base_dir)
-    wilcoxon_file = base_path / "master_wilcoxon_tests.parquet"
-    if wilcoxon_file.exists():
-        return pd.read_parquet(wilcoxon_file, engine='pyarrow')
-    return pd.DataFrame()
-
-
-@st.cache_data
 def load_seasonal_metrics(base_dir: str):
     candidate_paths = [
         Path(base_dir) / "seasonal_monthly_metrics.parquet",
@@ -164,7 +152,6 @@ def load_masterdata(filepath: str):
         if 'Sector_group_id' in df_master.columns and 'Sector_group' in df_master.columns:
             df_master['Sector_Label'] = df_master['Sector_group_id'].astype(str) + ": " + df_master['Sector_group'].astype(str)
             
-        # Extract sector information, CV and repeatability_score if they exist
         cols_to_keep = ['id']
         if 'Sector_group' in df_master.columns: cols_to_keep.append('Sector_group')
         if 'Sector_Label' in df_master.columns: cols_to_keep.append('Sector_Label')
@@ -181,6 +168,19 @@ def load_loadprofile_features(filepath: str):
     if p.exists():
         df_feat = pd.read_csv(p)
         return df_feat
+    return pd.DataFrame()
+
+
+@st.cache_data
+def load_portfolio_metrics(metrics_dir: str):
+    candidate_paths = [
+        Path(metrics_dir) / "portfolio_aggregation_metrics.parquet",
+        Path(__file__).resolve().parent / "portfolio_aggregation_metrics.parquet",
+        Path(r"C:\Users\lsb-ps\Documents\predictions_overview_lean\portfolio_aggregation_metrics.parquet"),
+    ]
+    for p in candidate_paths:
+        if p.exists():
+            return pd.read_parquet(p)
     return pd.DataFrame()
 
 
@@ -212,11 +212,11 @@ master_dir = r"C:\Users\lsb-ps\Documents\VEA_Playground\zero_shot_data\08_zero_s
 features_dir = r"C:\Users\lsb-ps\Documents\FIM_research_data\02_features\loadprofile_features.csv"
 if Path(metrics_dir).exists():
     df_metrics = load_metrics_data(metrics_dir)
-    df_wilcoxon = load_wilcoxon_stats(metrics_dir)
     df_master = load_masterdata(master_dir)
     df_features = load_loadprofile_features(features_dir)
     df_inference_times = load_inference_times(metrics_dir)
     df_seasonal = load_seasonal_metrics(metrics_dir)
+    df_portfolio = load_portfolio_metrics(metrics_dir)
     
     if not df_metrics.empty:
         if not df_master.empty and 'Sector_Label' in df_master.columns:
@@ -240,7 +240,6 @@ if Path(metrics_dir).exists():
 
         sector_agg = agg_col3.selectbox("Select Sector (Aggregated)", all_sectors, key="sector_agg")
 
-        # Dynamic Masking for Sector
         cohort_mask = (df_metrics['size_category'] == size_agg) & (df_metrics['combo_prefix'] == combo_agg)
         if sector_agg != "All Sectors":
             cohort_mask = cohort_mask & (df_metrics['Sector_Label'] == sector_agg)
@@ -320,142 +319,7 @@ if Path(metrics_dir).exists():
 
 
         st.markdown("---")
-        # --- Statistical Significance Section ---
-        st.subheader("Statistical Significance (Wilcoxon Signed-Rank Test)")
-        
-        stat_col1, stat_col2 = st.columns(2)
-        size_stat = stat_col1.selectbox("Select Size (Stats)", all_sizes, key="size_stat")
-        
-        valid_combos_stat = df_metrics[df_metrics['size_category'] == size_stat]['combo_prefix'].unique().tolist()
-        combo_stat = stat_col2.selectbox("Select Combination (Stats)", valid_combos_stat, key="combo_stat")
-        
-        if not df_wilcoxon.empty:
-            cohort_wilcoxon = df_wilcoxon[
-                (df_wilcoxon['size_category'] == size_stat) & 
-                (df_wilcoxon['combo_prefix'] == combo_stat)
-            ].copy()
-            
-            if not cohort_wilcoxon.empty:
-                # Drop columns that are used purely for internal slicing
-                drop_cols = ['size_category', 'combo_prefix']
-                if 'stratification_type' in cohort_wilcoxon.columns:
-                    drop_cols.extend(['stratification_type', 'stratification_value'])
-                
-                cohort_wilcoxon.drop(columns=[c for c in drop_cols if c in cohort_wilcoxon.columns], inplace=True, errors='ignore')
-                
-                metric_name_map = {
-                    'horizon_rmae_median': 'rMAE (Median)',
-                    'horizon_smape_median_median': 'sMAPE (Median)',
-                    'horizon_smape_median': 'sMAPE (Median)', 
-                    'horizon_rmse_median': 'RMSE (Median)',
-                    'horizon_da_mean': 'DA (Mean)'
-                }
-                cohort_wilcoxon['target_metric'] = cohort_wilcoxon['target_metric'].map(metric_name_map).fillna(cohort_wilcoxon['target_metric'])
-                
-                # Dynamic column renaming based on available data from the Wilcoxon master
-                rename_map = {
-                    'target_metric': 'Metric',
-                    'model_name': 'Model',
-                    'baseline_model': 'Baseline',
-                    'n_valid_samples': 'Valid (N)',
-                    'dropped_infs_nans': 'Dropped (Inf/NaN)',
-                    'median_difference': 'Median Diff.',
-                    'win_rate_pct': 'Win Rate (%)',
-                    'rank_biserial_r': 'Effect Size (r)',
-                    'w_statistic': 'W-Stat',
-                    'p_value': 'p-value',
-                    'p_value_fdr': 'FDR p-value',
-                    'is_significant': 'Significant',
-                    'conclusion': 'Conclusion'
-                }
-                cohort_wilcoxon.rename(columns=rename_map, inplace=True)
-                
-                def color_significance(val):
-                    if isinstance(val, bool):
-                        return 'background-color: #2e7d32; color: white' if val else 'background-color: #c62828; color: white'
-                    return ''
-                    
-                styled_df = cohort_wilcoxon.style.map(color_significance, subset=['Significant'])
-                
-                format_dict = {
-                    'p-value': lambda x: '< 0.001' if (x < 0.001 and x >= 0) else f"{x:.4f}",
-                    'FDR p-value': lambda x: '< 0.001' if (x < 0.001 and x >= 0) else f"{x:.4f}",
-                    'Median Diff.': "{:.4f}",
-                    'Win Rate (%)': "{:.2f}%",
-                    'Effect Size (r)': "{:.3f}",
-                    'W-Stat': "{:.0f}",
-                    'neg_log10_p_fdr': "{:.2f}"
-                }
-                
-                # Apply format only to columns that exist
-                styled_df = styled_df.format({k: v for k, v in format_dict.items() if k in cohort_wilcoxon.columns})
-                    
-                st.dataframe(styled_df, use_container_width=True, hide_index=True)
-            else:
-                st.info(f"No statistical tests found for Size: {size_stat}, Combo: {combo_stat}.")
-        else:
-            st.warning("Wilcoxon parquet file not found. Ensure 'master_wilcoxon_tests.parquet' exists in the metrics directory.")
-
-
-        st.markdown("---")
-        # --- Cross-Combination Analysis ---
-        st.subheader("Cross-Combination Model Analysis")
-        
-        cross_col1, cross_col2 = st.columns(2)
-        size_cross = cross_col1.selectbox("Select Size (Cross-Combo)", all_sizes, key="size_cross")
-        
-        valid_combos_cross = df_metrics[df_metrics['size_category'] == size_cross]['combo_prefix'].unique().tolist()
-        all_models = df_metrics[df_metrics['size_category'] == size_cross]['model_name'].unique().tolist()
-                
-        target_model = cross_col2.selectbox("Select Model to Analyze Across Combinations", all_models, key="model_cross")
-        
-        combo_comparisons = []
-        for combo in valid_combos_cross:
-            # Isolate the exact model, size, and combo
-            df_slice = df_metrics[
-                (df_metrics['size_category'] == size_cross) & 
-                (df_metrics['combo_prefix'] == combo) & 
-                (df_metrics['model_name'] == target_model)
-            ].replace([float('inf'), float('-inf')], pd.NA)
-            
-            if not df_slice.empty:
-                rmae_val = df_slice['horizon_rmae_median'].median() if 'horizon_rmae_median' in df_slice.columns else pd.NA
-                
-                if 'horizon_smape_median_median' in df_slice.columns:
-                    smape_val = df_slice['horizon_smape_median_median'].median()
-                elif 'horizon_smape_median' in df_slice.columns:
-                    smape_val = df_slice['horizon_smape_median'].median()
-                else:
-                    smape_val = pd.NA
-                
-                combo_comparisons.append({
-                    "Combination": combo,
-                    "rMAE (Median)": rmae_val,
-                    "sMAPE (Median)": smape_val
-                })
-                
-        if combo_comparisons:
-            comparison_df = pd.DataFrame(combo_comparisons).dropna().set_index("Combination")
-            
-            tab_rmae, tab_smape = st.tabs(["rMAE (Median)", "sMAPE (Median)"])
-            plot_df = comparison_df.reset_index()
-            line_color = '#ff7f0e' if target_model in BASELINE_MODELS else '#1f77b4'
-            
-            def create_line_chart(df, y_col):
-                chart = alt.Chart(df).mark_line(color=line_color, point=True).encode(
-                    x=alt.X('Combination:N', title='Forecast Combination'),
-                    y=alt.Y(f'{y_col}:Q', title=f'{y_col}')
-                ).properties(width='container', height=400, title=f"{target_model} - {y_col} Across Horizons")
-                return apply_thesis_theme(chart)
-            
-            with tab_rmae:
-                st.altair_chart(create_line_chart(plot_df, "rMAE (Median)"), use_container_width=True)
-            with tab_smape:
-                st.altair_chart(create_line_chart(plot_df, "sMAPE (Median)"), use_container_width=True)
-
-
-        st.markdown("---")
-        # --- c2 vs. c3 Comparison Across Models ---
+        # --- C2 vs. C3 Horizon Transition Analysis ---
         st.subheader("C2 vs. C3 Horizon Transition Analysis")
         st.markdown(
             "Direct comparison of model performance shifts between forecast combination **c2** and **c3** "
@@ -620,7 +484,7 @@ if Path(metrics_dir).exists():
                 if not df_slice.empty:
                     if selected_metric_time == "rMAE (Median)":
                         metric_val = df_slice['horizon_rmae_median'].median() if 'horizon_rmae_median' in df_slice.columns else pd.NA
-                    else:  # "sMAPE (Median)"
+                    else:
                         if 'horizon_smape_median_median' in df_slice.columns:
                             metric_val = df_slice['horizon_smape_median_median'].median()
                         elif 'horizon_smape_median' in df_slice.columns:
@@ -628,7 +492,6 @@ if Path(metrics_dir).exists():
 
                 inf_secs = get_inference_seconds(df_inference_times, target_model_time, size_time, combo)
 
-                # Compute average inference time per company (total run time divided by dataset size)
                 cohort_dataset_size = df_metrics[df_metrics['size_category'] == size_time]['id'].nunique()
                 n_companies = df_slice['id'].nunique() if not df_slice.empty and df_slice['id'].nunique() > 0 else cohort_dataset_size
                 avg_inf_secs = (inf_secs / n_companies) if (inf_secs is not None and n_companies > 0) else None
@@ -650,8 +513,8 @@ if Path(metrics_dir).exists():
                 else:
                     has_time_values = df_plot_time_valid['avg_time_per_company'].dropna().count() > 0
 
-                    metric_color = '#1f77b4'  # Steel Blue
-                    time_color = '#d62728'    # Crimson Red
+                    metric_color = '#1f77b4'
+                    time_color = '#d62728'
 
                     base_chart = alt.Chart(df_plot_time_valid).encode(
                         x=alt.X('Combination:N', title='Forecast Combination', sort=selected_combos_time)
@@ -745,7 +608,7 @@ if Path(metrics_dir).exists():
 
 
         st.markdown("---")
-        # --- Win Rates Per Metric ---
+        # --- Company-Level Win Rates ---
         st.subheader("Company-Level Win Rates")
         
         win_col1, win_col2 = st.columns(2)
@@ -813,7 +676,6 @@ if Path(metrics_dir).exists():
         
         sector_exp = exp_col3.selectbox("Select Sector (Export)", all_sectors, key="sector_exp")
 
-        # Dynamic Masking for Sector
         exp_mask = (df_metrics['size_category'] == exp_size) & (df_metrics['combo_prefix'] == exp_combo)
         if sector_exp != "All Sectors":
             exp_mask = exp_mask & (df_metrics['Sector_Label'] == sector_exp)
@@ -870,7 +732,7 @@ if Path(metrics_dir).exists():
 
 
         st.markdown("---")
-        # --- Demand Repeatability vs. Model Performance ---
+        # --- Demand Repeatability vs. Zero-Shot Competitiveness ---
         st.subheader("Demand Repeatability vs. Zero-Shot Competitiveness")
         st.markdown(
             "Evaluates whether Zero-Shot foundation models retain a comparative advantage over baseline models "
@@ -893,7 +755,6 @@ if Path(metrics_dir).exists():
                 (df_metrics['combo_prefix'] == combo_rep)
             ].replace([float('inf'), float('-inf')], pd.NA)
 
-            # If repeatability_score already merged into df_metrics at top-level, reuse it; otherwise merge from df_master
             if 'repeatability_score' in rep_slice.columns:
                 rep_merged = rep_slice.dropna(subset=['repeatability_score'])
             else:
@@ -906,7 +767,6 @@ if Path(metrics_dir).exists():
                 )
 
                 rep_merged = rep_merged.dropna(subset=[raw_metric_col])
-                # Ensure ordered categorical tier labels
                 tier_order = ['Low (<0.6)', 'Medium (0.6-0.85)', 'High (>=0.85)']
                 rep_merged['tier'] = pd.cut(
                     rep_merged['repeatability_score'],
@@ -917,7 +777,6 @@ if Path(metrics_dir).exists():
                 rep_merged['is_baseline'] = rep_merged['model_name'].isin(BASELINE_MODELS)
                 rep_merged['model_type'] = rep_merged['is_baseline'].map({True: 'Baseline', False: 'Zero-Shot'})
 
-                # --- Plot 1: Performance Metric across Repeatability Tiers by Model ---
                 tier_agg = rep_merged.groupby(['model_name', 'tier', 'model_type'], observed=False)[raw_metric_col].median().reset_index()
                 tier_agg.rename(columns={raw_metric_col: 'Metric Value', 'model_name': 'Model', 'model_type': 'Model Type'}, inplace=True)
                 tier_agg['tier'] = pd.Categorical(tier_agg['tier'], categories=tier_order, ordered=True)
@@ -960,7 +819,6 @@ if Path(metrics_dir).exists():
                     )
                 )
 
-                # --- Plot 2: Zero-Shot vs. Baseline Win Share across Tiers ---
                 piv_wins = rep_merged.pivot_table(
                     index=['id', 'tier'],
                     columns='model_name',
@@ -1019,46 +877,6 @@ if Path(metrics_dir).exists():
                 with col_rep2:
                     st.altair_chart(apply_thesis_theme(win_share_chart), use_container_width=True)
                     st.caption("🔵 **Zero-Shot Models** &nbsp;|&nbsp; 🟠 **Baselines** (Company win determined by lowest error).")
-
-                # --- Plot 3: Scatter Correlation for Selected Model ---
-                with st.expander("Explore Continuous Correlation (Repeatability Score vs. Model Error)"):
-                    all_avail_models = sorted(rep_merged['model_name'].unique().tolist())
-                    selected_scatter_model = st.selectbox(
-                        "Select Model for Detailed Scatter Plot",
-                        all_avail_models,
-                        key="model_scatter_rep"
-                    )
-
-                    scatter_df = rep_merged[rep_merged['model_name'] == selected_scatter_model].dropna(
-                        subset=['repeatability_score', raw_metric_col]
-                    )
-
-                    if not scatter_df.empty:
-                        r_score = scatter_df['repeatability_score'].corr(scatter_df[raw_metric_col])
-                        st.info(f"**Pearson Correlation ($r$) for {selected_scatter_model}:** `{r_score:.4f}`")
-
-                        scatter_plot = alt.Chart(scatter_df).mark_circle(size=40, opacity=0.4, color='#1f77b4').encode(
-                            x=alt.X('repeatability_score:Q', title='Daily Repeatability Score (Pearson r across days)'),
-                            y=alt.Y(f'{raw_metric_col}:Q', title=metric_rep_choice),
-                            tooltip=['id', 'repeatability_score', alt.Tooltip(f'{raw_metric_col}:Q', format='.4f')]
-                        )
-                        trendline_rep = scatter_plot.transform_regression(
-                            'repeatability_score', raw_metric_col
-                        ).mark_line(color='#ff7f0e', strokeWidth=3)
-
-                        scatter_chart = (scatter_plot + trendline_rep).properties(
-                            width='container',
-                            height=450,
-                            title=alt.TitleParams(
-                                text=f"{selected_scatter_model}: {metric_rep_choice} vs. Daily Repeatability Score",
-                                anchor='middle',
-                                fontSize=18,
-                                offset=15,
-                                orient='top'
-                            )
-                        ).interactive()
-
-                        st.altair_chart(apply_thesis_theme(scatter_chart), use_container_width=True)
             else:
                 st.warning("No matching metrics found for the selected combination and size.")
         else:
@@ -1066,7 +884,7 @@ if Path(metrics_dir).exists():
 
 
         st.markdown("---")
-        # --- Peak Penalty & Volatility: rMAE vs. rRMSE Scatter Quadrant ---
+        # --- Peak Penalty & Outlier Volatility: rMAE vs. rRMSE ---
         st.subheader("Peak Penalty & Outlier Volatility: rMAE vs. rRMSE")
         st.markdown(
             "Compares typical day-to-day error (**rMAE**) against peak and outlier error sensitivity (**rRMSE**, relative to Seasonal Naive). "
@@ -1103,7 +921,6 @@ if Path(metrics_dir).exists():
             peak_agg['Architecture'] = peak_agg['Model'].apply(lambda x: 'Baseline' if x in BASELINE_MODELS else 'Zero-Shot')
             peak_agg['Peak Penalty Ratio (rRMSE / rMAE)'] = peak_agg['rRMSE'] / peak_agg['rMAE']
 
-            # Fixed focused scale domains to zoom in on crowded competitive zone
             min_x = 0.7
             max_x = 1.8
             min_y = 0.7
@@ -1111,7 +928,6 @@ if Path(metrics_dir).exists():
             diag_min = max(min_x, min_y)
             diag_max = min(max_x, max_y)
 
-            # Mark and clip outliers at boundary for visual display while preserving exact values in tooltips
             peak_agg['is_outlier'] = (peak_agg['rMAE'] > max_x) | (peak_agg['rRMSE'] > max_y) | (peak_agg['rMAE'] < min_x) | (peak_agg['rRMSE'] < min_y)
             peak_agg['display_label'] = peak_agg['Model'] + peak_agg['is_outlier'].map({True: ' [clipped]', False: ''})
             peak_agg['plot_rMAE'] = peak_agg['rMAE'].clip(lower=min_x, upper=max_x)
@@ -1135,7 +951,6 @@ if Path(metrics_dir).exists():
                 align='left'
             ).encode(x='plot_rMAE:Q', y='plot_rRMSE:Q')
 
-            # Prominent bold reference lines at 1.0 for rMAE and rRMSE (Seasonal Naive baseline)
             ref_x_df = pd.DataFrame({'plot_rMAE': [1.0]})
             ref_x_rule = alt.Chart(ref_x_df).mark_rule(
                 color='#1f2937',
@@ -1181,8 +996,6 @@ if Path(metrics_dir).exists():
                 ]
             ).add_params(highlight_peak)
 
-            # Custom directional label placement for dense clusters
-            # Bolt9m (bottom-left), Bolt43m (top-left), Bolt21m (top-right), Chronos2 (top-left), Moirai20 (bottom-right)
             label_pos_map = {
                 'Bolt9m': 'bottom-right',
                 'Bolt43m': 'bottom-right',
@@ -1207,7 +1020,6 @@ if Path(metrics_dir).exists():
             for pos_name, style in pos_styles.items():
                 pos_df = peak_agg[peak_agg['label_pos'] == pos_name]
                 if not pos_df.empty:
-                    # White halo layer
                     halo = alt.Chart(pos_df).mark_text(
                         align=style['align'],
                         baseline=style['baseline'],
@@ -1223,7 +1035,6 @@ if Path(metrics_dir).exists():
                         text='display_label:N',
                         opacity=alt.condition(highlight_peak, alt.value(1.0), alt.value(0.15))
                     )
-                    # Foreground crisp text layer
                     text_layer = alt.Chart(pos_df).mark_text(
                         align=style['align'],
                         baseline=style['baseline'],
@@ -1278,7 +1089,7 @@ if Path(metrics_dir).exists():
 
 
         st.markdown("---")
-        # --- Trend Identification: Magnitude vs. Momentum (rMAE vs. Directional Accuracy) ---
+        # --- Trend Identification: Magnitude vs. Momentum Trade-Off ---
         st.subheader("Trend Identification: Magnitude vs. Momentum Trade-Off")
         st.markdown(
             "Analyzes whether models that achieve low magnitude error (**rMAE**, average load tracking) also capture "
@@ -1319,13 +1130,11 @@ if Path(metrics_dir).exists():
             min_da_y = 30.0
             max_da_y = 56.0
 
-            # Mark and clip outliers at boundary while keeping actual values in tooltip
             da_agg['is_outlier'] = (da_agg['rMAE'] > max_da_x) | (da_agg['rMAE'] < min_da_x) | (da_agg['DA'] > max_da_y) | (da_agg['DA'] < min_da_y)
             da_agg['display_label'] = da_agg['Model'] + da_agg['is_outlier'].map({True: ' [clipped]', False: ''})
             da_agg['plot_rMAE'] = da_agg['rMAE'].clip(lower=min_da_x, upper=max_da_x)
             da_agg['plot_DA'] = da_agg['DA'].clip(lower=min_da_y, upper=max_da_y)
 
-            # Top-left green quadrant: rMAE < 1.0 (better than baseline) and DA > 50% (better than random guess)
             green_rect_da_df = pd.DataFrame([{
                 'plot_rMAE': min_da_x,
                 'plot_rMAE2': 1.0,
@@ -1342,14 +1151,12 @@ if Path(metrics_dir).exists():
                 y2='plot_DA2:Q'
             )
 
-            # Reference line at rMAE = 1.0 (SeasonNaive level baseline)
             ref_da_x = alt.Chart(pd.DataFrame({'plot_rMAE': [1.0]})).mark_rule(
                 color='#1f2937',
                 strokeWidth=2.2,
                 strokeDash=[5, 4]
             ).encode(x='plot_rMAE:Q')
 
-            # Reference line at DA = 50.0% (Coin-flip / Random guess threshold)
             ref_da_y = alt.Chart(pd.DataFrame({'plot_DA': [50.0]})).mark_rule(
                 color='#dc2626',
                 strokeWidth=2.0,
@@ -1393,7 +1200,6 @@ if Path(metrics_dir).exists():
                 ]
             ).add_params(highlight_da)
 
-            # Custom directional label offsets for crowded clusters
             label_pos_map_da = {
                 'Bolt9m': 'bottom-left',
                 'Bolt43m': 'top-left',
@@ -1488,7 +1294,7 @@ if Path(metrics_dir).exists():
 
 
         st.markdown("---")
-        # --- Sector Predictability & Architecture Comparison ---
+        # --- Sector Predictability: Zero-Shot vs. Baseline Across Industry Archetypes ---
         st.subheader("Sector Predictability: Zero-Shot vs. Baseline Across Industry Archetypes")
         st.markdown(
             "Evaluates industrial load predictability across all economic sectors. Each sector is classified into "
@@ -1509,7 +1315,6 @@ if Path(metrics_dir).exists():
                 (df_metrics['combo_prefix'] == combo_sec)
             ].replace([float('inf'), float('-inf')], pd.NA)
 
-            # Ensure Sector_group is available
             if 'Sector_group' not in df_sec_slice.columns:
                 df_sec_slice = df_sec_slice.merge(df_master[['id', 'Sector_group']], on='id', how='inner')
 
@@ -1523,17 +1328,14 @@ if Path(metrics_dir).exists():
                     lambda x: 'Baseline Models' if x in BASELINE_MODELS else 'Zero-Shot Models'
                 )
 
-                # 1. Sector-level median per specific model
                 sector_model_medians = df_sec_slice.groupby(['Sector_group', 'model_name', 'Architecture'])[smape_col_sec].median().reset_index()
 
-                # Best Zero-Shot model per sector
                 zs_sector_df = sector_model_medians[sector_model_medians['Architecture'] == 'Zero-Shot Models']
                 best_zs_per_sector = zs_sector_df.loc[zs_sector_df.groupby('Sector_group')[smape_col_sec].idxmin()].rename(
                     columns={'model_name': 'Best Zero-Shot Model', smape_col_sec: 'zs_smape'}
                 )
                 best_zs_per_sector['Zero-Shot Accuracy (%)'] = 100.0 - best_zs_per_sector['zs_smape']
 
-                # Best Baseline model per sector
                 base_sector_df = sector_model_medians[sector_model_medians['Architecture'] == 'Baseline Models']
                 best_base_per_sector = base_sector_df.loc[base_sector_df.groupby('Sector_group')[smape_col_sec].idxmin()].rename(
                     columns={'model_name': 'Best Baseline Model', smape_col_sec: 'base_smape'}
@@ -1541,24 +1343,20 @@ if Path(metrics_dir).exists():
                 best_base_per_sector['Baseline Accuracy (%)'] = 100.0 - best_base_per_sector['base_smape']
 
                 if not best_zs_per_sector.empty and not best_base_per_sector.empty:
-                    # Merge Zero-Shot and Baseline per sector
                     sector_comp_table = best_zs_per_sector[['Sector_group', 'Best Zero-Shot Model', 'Zero-Shot Accuracy (%)']].merge(
                         best_base_per_sector[['Sector_group', 'Best Baseline Model', 'Baseline Accuracy (%)']],
                         on='Sector_group'
                     )
 
-                    # Representative sector accuracy based strictly on the comparison of the two groups
                     sector_comp_table['Sector Accuracy (%)'] = (sector_comp_table['Zero-Shot Accuracy (%)'] + sector_comp_table['Baseline Accuracy (%)']) / 2.0
                     sector_comp_table['Zero-Shot Advantage (% pts)'] = sector_comp_table['Zero-Shot Accuracy (%)'] - sector_comp_table['Baseline Accuracy (%)']
 
-                    # Segment sectors into 3 classes based on the comparative accuracy level
                     sector_comp_table['Predictability Class'] = pd.qcut(
                         sector_comp_table['Sector Accuracy (%)'],
                         q=3,
                         labels=['Low Predictability', 'Medium Predictability', 'High Predictability']
                     )
 
-                    # 2. Aggregate 6-bar data (median of sectors in each predictability class)
                     class_bars = sector_comp_table.groupby('Predictability Class', observed=False).agg({
                         'Zero-Shot Accuracy (%)': 'median',
                         'Baseline Accuracy (%)': 'median'
@@ -1646,7 +1444,6 @@ if Path(metrics_dir).exists():
                         "Notice the performance advantage of zero-shot models in the **Low Predictability** class."
                     )
 
-                    # Table displaying sector correspondence with specific best model names
                     st.markdown("##### Sector Predictability Classification & Best Model Mapping")
                     disp_mapping = sector_comp_table[[
                         'Sector_group',
@@ -1681,7 +1478,7 @@ if Path(metrics_dir).exists():
 
 
         st.markdown("---")
-        # --- Seasonal & Monthly Predictability ---
+        # --- Seasonal & Monthly Predictability: Zero-Shot vs. Baselines ---
         st.subheader("Seasonal & Monthly Predictability: Zero-Shot vs. Baselines")
         st.markdown(
             "Evaluates whether specific calendar seasons or months are systematically more predictable than others, "
@@ -1719,14 +1516,12 @@ if Path(metrics_dir).exists():
 
             seas_slice = df_seasonal[(df_seasonal['size'] == size_seas) & (df_seasonal['combo'] == combo_seas)].copy()
 
-            # Clean baseline & zero-shot comparison pair
             active_models = ['Top Zero-Shot (Chronos/Bolt/Moirai)', 'Top Baseline (SeasonNaive/TSMixer)']
             label_mapping = {
                 'Top Zero-Shot (Chronos/Bolt/Moirai)': 'Zero-Shot Models',
                 'Top Baseline (SeasonNaive/TSMixer)': 'Baseline Models'
             }
 
-            # Seasonal display mode toggle
             seas_mode = st.radio(
                 "Seasonal Representation on 12-Month Grid",
                 [
@@ -1737,12 +1532,8 @@ if Path(metrics_dir).exists():
                 key="seas_display_mode"
             )
 
-            # -------------------------------------------------------------
-            # Unified Chart: 12-Month & 4-Season Predictability Grid
-            # -------------------------------------------------------------
             month_order = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
-            # 1. Monthly Scatter & Line Data
             df_m = seas_slice[
                 (seas_slice['granularity'] == 'Monthly') &
                 (seas_slice['model_name'].isin(active_models))
@@ -1751,7 +1542,6 @@ if Path(metrics_dir).exists():
             df_m['Series_Type'] = df_m['Architecture_Label'] + ' (Monthly)'
             df_m['period_label'] = pd.Categorical(df_m['period_label'], categories=month_order, ordered=True)
 
-            # 2. Seasonal Scatter & Line Data
             s_raw = seas_slice[
                 (seas_slice['granularity'] == 'Seasonal') &
                 (seas_slice['model_name'].isin(active_models))
@@ -1760,8 +1550,6 @@ if Path(metrics_dir).exists():
             chart_layers = []
 
             if "Trend Line" in seas_mode:
-                # Mode A: Seasonal midpoints connected across the calendar year
-                # Winter mapped to Jan (and Dec), Spring to Apr, Summer to Jul, Autumn to Oct
                 season_midpoints = [
                     ('Winter', 'Jan'),
                     ('Spring', 'Apr'),
@@ -1788,7 +1576,6 @@ if Path(metrics_dir).exists():
                 df_s = pd.DataFrame(s_rows)
                 df_s['period_label'] = pd.Categorical(df_s['period_label'], categories=month_order, ordered=True)
 
-                # Compute dynamic Y scale (starting at 8 for MAE, or 0.0 with headroom for rMAE)
                 max_val_y = float(max(df_m[metric_col].max(), df_s[metric_col].max()) * 1.08)
                 if is_rmae:
                     max_val_y = max(max_val_y, 1.15)
@@ -1812,7 +1599,6 @@ if Path(metrics_dir).exists():
                     ]
                 )
 
-                # Text label above seasonal diamonds
                 text_seasonal = alt.Chart(df_s).mark_text(
                     align='center',
                     baseline='bottom',
@@ -1828,7 +1614,6 @@ if Path(metrics_dir).exists():
                 chart_layers.extend([line_seasonal, text_seasonal])
 
             else:
-                # Mode B: Stepped horizontal plateau segments across each season's 3-month window
                 season_segments = [
                     ('Winter_1', 'Winter', ['Jan', 'Feb']),
                     ('Spring', 'Spring', ['Mar', 'Apr', 'May']),
@@ -1858,7 +1643,6 @@ if Path(metrics_dir).exists():
                 df_step = pd.DataFrame(s_step_rows)
                 df_step['period_label'] = pd.Categorical(df_step['period_label'], categories=month_order, ordered=True)
 
-                # Compute dynamic Y scale (starting at 8 for MAE, or 0.0 with headroom for rMAE)
                 max_val_y = float(max(df_m[metric_col].max(), df_step[metric_col].max()) * 1.08)
                 if is_rmae:
                     max_val_y = max(max_val_y, 1.15)
@@ -1883,7 +1667,6 @@ if Path(metrics_dir).exists():
                     ]
                 )
 
-                # Text label at season center
                 text_plateau = alt.Chart(df_step[df_step['is_center'] == True]).mark_text(
                     align='center',
                     baseline='bottom',
@@ -1898,7 +1681,6 @@ if Path(metrics_dir).exists():
                 )
                 chart_layers.extend([line_plateau, text_plateau])
 
-            # Monthly line and scatter layer (solid line + circular points)
             line_monthly = alt.Chart(df_m).mark_line(
                 point=alt.OverlayMarkDef(shape='circle', filled=True, size=75),
                 strokeWidth=2.5
@@ -1906,7 +1688,7 @@ if Path(metrics_dir).exists():
                 x=alt.X(
                     'period_label:O',
                     sort=month_order,
-                    title='Calendar Month (Mapped into 4 Seasons)',#: Winter [Dec–Feb] | Spring [Mar–May] | Summer [Jun–Aug] | Autumn [Sep–Nov])',
+                    title='Calendar Month (Mapped into 4 Seasons)',
                     axis=alt.Axis(labelAngle=0, labelFontSize=13, titleFontSize=14)
                 ),
                 y=alt.Y(
@@ -1960,9 +1742,6 @@ if Path(metrics_dir).exists():
                 unsafe_allow_html=True
             )
 
-            # -------------------------------------------------------------
-            # Table: Monthly & Seasonal Predictability Breakdown
-            # -------------------------------------------------------------
             st.markdown("##### Monthly & Seasonal Predictability Breakdown")
 
             monthly_all = seas_slice[seas_slice['granularity'] == 'Monthly'].copy()
@@ -2020,7 +1799,6 @@ if Path(metrics_dir).exists():
                 use_container_width=True
             )
 
-            # Four Seasons Aggregate Summary Table
             st.markdown("###### Seasonal Summary (Four Seasons Aggregate)")
             seasonal_all = seas_slice[seas_slice['granularity'] == 'Seasonal'].copy()
             seas_table_rows = []
@@ -2053,7 +1831,7 @@ if Path(metrics_dir).exists():
 
 
         st.markdown("---")
-        # --- Section 5.4: Predictability Distribution & Estimator Analysis ---
+        # --- Predictability Distribution: Scale Dynamics & Leading Estimators ---
         st.subheader("Predictability Distribution: Scale Dynamics & Leading Estimators")
         st.markdown(
             "Analyzes the **empirical lower bound of predictability** (the lowest achievable sMAPE floor across all models per site) "
@@ -2072,16 +1850,12 @@ if Path(metrics_dir).exists():
             (df_metrics['combo_prefix'] == combo_pred)
         ].copy()
 
-        # Identify the core sMAPE column
         smape_col = 'horizon_smape_median_median' if 'horizon_smape_median_median' in pred_df.columns else 'horizon_smape_median'
         
-        # Calculate Empirical Lower Bound per ID
         lower_bound_df = pred_df.groupby('id')[smape_col].min().reset_index().rename(columns={smape_col: 'Minimum_sMAPE'})
 
-        # Find best Baseline model (SeasonNaive)
         sn_slice = pred_df[pred_df['model_name'] == 'SeasonNaive'][['id', smape_col]].rename(columns={smape_col: 'SeasonNaive_sMAPE'})
 
-        # Identify best Zero-Shot model for this combo
         zs_models_combo = [m for m in pred_df['model_name'].unique() if m not in BASELINE_MODELS]
         if zs_models_combo:
             best_zs_name = pred_df[pred_df['model_name'].isin(zs_models_combo)].groupby('model_name')[smape_col].median().idxmin()
@@ -2090,10 +1864,8 @@ if Path(metrics_dir).exists():
             best_zs_name = 'Zero-Shot'
             best_zs_slice = pd.DataFrame(columns=['id', f'{best_zs_name}_sMAPE'])
 
-        # Merge base metrics
         merged_pred = lower_bound_df.merge(sn_slice, on='id', how='left').merge(best_zs_slice, on='id', how='left')
 
-        # Merge features from df_features and df_master
         if not df_features.empty:
             merged_pred = merged_pred.merge(df_features, on='id', how='inner')
         if not df_master.empty:
@@ -2107,9 +1879,6 @@ if Path(metrics_dir).exists():
                 "2. Usage Hours Dynamics & Discretization"
             ])
 
-            # -------------------------------------------------------------
-            # TAB 1: Consumption Scale Dynamics
-            # -------------------------------------------------------------
             with tab_scale:
                 st.markdown("##### Total Consumption vs. Forecast Predictability")
                 st.markdown(
@@ -2144,7 +1913,6 @@ if Path(metrics_dir).exists():
                 tier_summary['Zero-Shot Accuracy (%)'] = 100.0 - tier_summary['ZS_sMAPE']
                 tier_summary['Δ Advantage (% pts)'] = tier_summary['SN_sMAPE'] - tier_summary['ZS_sMAPE']
 
-                # Display KPI metric cards
                 kpi_col1, kpi_col2, kpi_col3 = st.columns(3)
                 for col_kpi, (_, row_t) in zip([kpi_col1, kpi_col2, kpi_col3], tier_summary.iterrows()):
                     with col_kpi:
@@ -2154,7 +1922,6 @@ if Path(metrics_dir).exists():
                             delta=f"{row_t['Δ Advantage (% pts)']:+.2f}% pts vs Baseline"
                         )
 
-                # Prepare Altair Grouped Bar Chart
                 plot_rows = []
                 for _, row_t in tier_summary.iterrows():
                     plot_rows.append({
@@ -2233,7 +2000,6 @@ if Path(metrics_dir).exists():
 
                 st.altair_chart(apply_thesis_theme(chart_tier), use_container_width=True)
 
-                # Detailed Reproducibility Table
                 st.markdown("###### Reproducible Consumption Tier Performance Breakdown")
                 st.caption(
                     "Proves exact empirical calculations across enterprise size tiers. "
@@ -2273,9 +2039,6 @@ if Path(metrics_dir).exists():
                     use_container_width=True
                 )
 
-            # -------------------------------------------------------------
-            # TAB 2: Usage Hours Dynamics & Discretization
-            # -------------------------------------------------------------
             with tab_estimators:
                 st.markdown("##### Leading Predictability Estimator: Usage Hours")
                 st.markdown(
@@ -2288,7 +2051,6 @@ if Path(metrics_dir).exists():
                     r_pearson = v['Minimum_sMAPE'].corr(v['usage_hours_h'])
                     rho_spearman = v['Minimum_sMAPE'].corr(v['usage_hours_h'], method='spearman')
 
-                    # Correlation Summary Cards
                     m_col1, m_col2, m_col3 = st.columns(3)
                     with m_col1:
                         st.metric(
@@ -2336,12 +2098,10 @@ if Path(metrics_dir).exists():
                             Sites=('id', 'count')
                         ).reset_index()
 
-                        # Round usage hour values for the quantiles to one digit after the comma
                         bin_agg['Bin_Label'] = bin_agg['bin'].apply(lambda x: f"({x.left:.1f}, {x.right:.1f}] h")
                         bin_agg['Δ Advantage (% pts)'] = bin_agg['SN_sMAPE'] - bin_agg['ZS_sMAPE']
                         bin_agg['Order'] = range(len(bin_agg))
 
-                        # Melt for multi-line chart
                         df_disc_lines = bin_agg.melt(
                             id_vars=['Bin_Label', 'Order'],
                             value_vars=['Floor_sMAPE', 'SN_sMAPE', 'ZS_sMAPE'],
@@ -2397,7 +2157,6 @@ if Path(metrics_dir).exists():
                         st.altair_chart(apply_thesis_theme(chart_disc_lines), use_container_width=True)
                         st.altair_chart(apply_thesis_theme(chart_disc_bar), use_container_width=True)
 
-                        # Reproducibility table for bins
                         st.markdown("###### Quantile Bin Performance Breakdown")
                         disp_bin_table = bin_agg[['Bin_Label', 'Sites', 'Floor_sMAPE', 'SN_sMAPE', 'ZS_sMAPE', 'Δ Advantage (% pts)']].copy()
                         disp_bin_table.rename(columns={
@@ -2421,6 +2180,158 @@ if Path(metrics_dir).exists():
                     st.warning("Usage Hours column ('usage_hours_h') not found in features.")
         else:
             st.warning("Load profile features not available or no overlapping IDs found.")
+
+        st.markdown("---")
+        # --- Impact of the Portfolio Effect: Multi-Site Aggregation ---
+        st.subheader("Impact of the Portfolio Effect: Multi-Site Aggregation")
+        st.markdown(
+            "Evaluates how aggregating individual industrial load profiles into collective portfolios affects forecast predictability. "
+            "Under the portfolio effect (Law of Large Numbers), uncorrelated stochastic demand shocks cancel out, lowering relative forecast error. "
+            "This experiment evaluates portfolio scaling across nine orders of magnitude from **K = 1 to 5,000 industrial sites**."
+        )
+
+        if not df_portfolio.empty:
+            grid_levels = {
+                1: "Single Industrial Site",
+                10: "Local Microgrid / Energy Community",
+                20: "Industrial Park Feeder",
+                50: "Distribution Substation Level",
+                100: "Municipal Utility Balancing Group",
+                200: "Regional Distribution Portfolio",
+                500: "Large Regional Aggregator",
+                1000: "Distribution System Operator (DSO)",
+                2000: "Transmission Feeder Level",
+                5000: "Nationwide Industrial Grid Portfolio"
+            }
+            k_order = [1, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000]
+            label_order = [f"{k:,}" for k in k_order]
+
+            df_port_view = df_portfolio.copy()
+            df_port_view['Operational Scale'] = df_port_view['Portfolio_Size_K'].map(grid_levels).fillna("Aggregated Portfolio")
+            df_port_view['K_Label'] = df_port_view['Portfolio_Size_K'].apply(lambda x: f"{x:,}")
+
+            df_plot_port = df_port_view.melt(
+                id_vars=['Portfolio_Size_K', 'K_Label'],
+                value_vars=['Chronos2_sMAPE', 'SeasonNaive_sMAPE', 'Theoretical_1_sqrt_K'],
+                var_name='Series',
+                value_name='sMAPE (%)'
+            )
+            name_map = {
+                'Chronos2_sMAPE': 'Zero-Shot Model (Chronos2)',
+                'SeasonNaive_sMAPE': 'Baseline (SeasonNaive)',
+                'Theoretical_1_sqrt_K': 'Theoretical Uncorrelated Benchmark'
+            }
+            df_plot_port['Model / Benchmark'] = df_plot_port['Series'].map(name_map)
+
+            color_scale = alt.Scale(
+                domain=[
+                    'Zero-Shot Model (Chronos2)',
+                    'Baseline (SeasonNaive)',
+                    'Theoretical Uncorrelated Benchmark'
+                ],
+                range=['#1f77b4', '#ff7f0e', '#7f7f7f']
+            )
+
+            dash_scale = alt.Scale(
+                domain=[
+                    'Zero-Shot Model (Chronos2)',
+                    'Baseline (SeasonNaive)',
+                    'Theoretical Uncorrelated Benchmark'
+                ],
+                range=[[0], [0], [6, 4]]
+            )
+
+            chart_port = alt.Chart(df_plot_port).mark_line(
+                point=alt.OverlayMarkDef(filled=True, size=55),
+                strokeWidth=2.8
+            ).encode(
+                x=alt.X(
+                    'K_Label:O',
+                    sort=label_order,
+                    title='Portfolio Size K (Aggregated Industrial Sites)',
+                    axis=alt.Axis(
+                        labelAngle=0,
+                        labelFontSize=12,
+                        titleFontSize=14
+                    )
+                ),
+                y=alt.Y(
+                    'sMAPE (%):Q',
+                    title='Portfolio Forecast Error (sMAPE %)',
+                    scale=alt.Scale(zero=False, domain=[0, 20]),
+                    axis=alt.Axis(labelFontSize=12, titleFontSize=14)
+                ),
+                color=alt.Color(
+                    'Model / Benchmark:N',
+                    scale=color_scale,
+                    legend=alt.Legend(
+                        title='Model / Benchmark',
+                        orient='top',
+                        labelFontSize=12,
+                        titleFontSize=13
+                    )
+                ),
+                strokeDash=alt.StrokeDash('Model / Benchmark:N', scale=dash_scale, legend=None),
+                tooltip=[
+                    alt.Tooltip('Portfolio_Size_K:Q', title='Portfolio Size (K)', format=',d'),
+                    alt.Tooltip('Model / Benchmark:N', title='Series'),
+                    alt.Tooltip('sMAPE (%):Q', title='sMAPE (%)', format='.2f')
+                ]
+            ).properties(
+                width='container',
+                height=480,
+                title=alt.TitleParams(
+                    text="Portfolio Predictability Multi-Site Aggregation (K = 1 to 5,000)",
+                    anchor='middle',
+                    fontSize=18,
+                    offset=15
+                )
+            )
+
+            st.altair_chart(apply_thesis_theme(chart_port), use_container_width=True)
+
+            st.markdown("###### Empirical Portfolio Aggregation Scaling Breakdown")
+            st.caption(
+                "Evaluates forecast error progression across increasing portfolio scales. "
+                "Zero-Shot Advantage (Δ % pts) = SeasonNaive sMAPE - Chronos2 sMAPE; "
+                "Relative Error Reduction (%) = (SeasonNaive - Chronos2) / SeasonNaive * 100; "
+                "Theoretical Benchmark = sMAPE(K=1) / sqrt(K)."
+            )
+
+            df_port_view['ZeroShot_Advantage_pts'] = df_port_view['SeasonNaive_sMAPE'] - df_port_view['Chronos2_sMAPE']
+            df_port_view['Relative_Error_Reduction_pct'] = (
+                (df_port_view['SeasonNaive_sMAPE'] - df_port_view['Chronos2_sMAPE']) / df_port_view['SeasonNaive_sMAPE']
+            ) * 100
+
+            disp_port_table = df_port_view[[
+                'Portfolio_Size_K', 'Operational Scale',
+                'Chronos2_sMAPE', 'SeasonNaive_sMAPE',
+                'ZeroShot_Advantage_pts', 'Relative_Error_Reduction_pct',
+                'Theoretical_1_sqrt_K'
+            ]].copy()
+
+            disp_port_table.rename(columns={
+                'Portfolio_Size_K': 'Portfolio Size (K)',
+                'Chronos2_sMAPE': 'Chronos2 (sMAPE %)',
+                'SeasonNaive_sMAPE': 'SeasonNaive (sMAPE %)',
+                'ZeroShot_Advantage_pts': 'Zero-Shot Advantage (Δ % pts)',
+                'Relative_Error_Reduction_pct': 'Relative Error Reduction (%)',
+                'Theoretical_1_sqrt_K': 'Theoretical Benchmark (1/√K %)'
+            }, inplace=True)
+
+            st.dataframe(
+                disp_port_table.style.format({
+                    'Portfolio Size (K)': '{:,d}',
+                    'Chronos2 (sMAPE %)': '{:.2f}%',
+                    'SeasonNaive (sMAPE %)': '{:.2f}%',
+                    'Zero-Shot Advantage (Δ % pts)': '{:+.2f}% pts',
+                    'Relative Error Reduction (%)': '{:+.2f}%',
+                    'Theoretical Benchmark (1/√K %)': '{:.2f}%'
+                }),
+                use_container_width=True
+            )
+        else:
+            st.warning("Portfolio metrics file ('portfolio_aggregation_metrics.parquet') not found.")
                 
     else:
         st.warning("Master metrics parquet file is empty or not generated yet.")
