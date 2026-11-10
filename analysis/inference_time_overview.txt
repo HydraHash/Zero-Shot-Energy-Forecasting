@@ -1,0 +1,58 @@
+====================================================================================================
+                             MODEL PREDICTION EXECUTION TIME OVERVIEW                                
+                         EXECUTION SUMMARY MATRIX (DURATION & ENVIRONMENT)                          
+====================================================================================================
+Updated at: 2026-11-05 14:14:03
+Execution Environment Guide:
+  - Drive S: Remote Server (e.g. S:\LSB-PS\...)
+  - Drive C: Local Machine (e.g. C:\Users\lsb-ps\Documents\...)
+====================================================================================================
+
+#  | Model Name       | Size   | c1                | c2                | c3                | c4               
+---------------------------------------------------------------------------------------------------------
+ 1 | 1_TSMixer        | Normal | 05m 55s [C]       | 07m 32s [C]       | 12m 22s [C]       | 19m 35s [C]      
+ 1 | 1_TSMixer        | Small  | 01m 45s [C]       | 07m 28s [C]       | 08m 09s [C]       | 12m 45s [C]      
+ 2 | 2_GoogleCNN      | Normal | 05m 30s [C]       | 02m 08s [C]       | 05m 41s [C]       | 06m 05s [C]      
+ 2 | 2_GoogleCNN      | Small  | 01m 06s [C]       | 51s [C]           | 01m 11s [C]       | 01m 18s [C]      
+ 3 | 3_SeasonNaive    | Normal | 04m 54s [C]       | 02m 17s [C]       | 04m 28s [C]       | 04m 26s [C]      
+ 3 | 3_SeasonNaive    | Small  | 34s [C]           | 21s [C]           | 34s [C]           | 32s [C]          
+ 4 | 4_HistoricAvg    | Normal | 04m 54s [C]       | 02m 17s [C]       | 04m 28s [C]       | 04m 26s [C]      
+ 4 | 4_HistoricAvg    | Small  | 34s [C]           | 21s [C]           | 34s [C]           | 32s [C]          
+ 6 | 6_Chronos2       | Normal | 11h 08m 05s [S]   | 41h 08m 39s [S]   | 33h 24m 30s [S]   | 80h 12m 15s [S](!)
+ 6 | 6_Chronos2       | Small  | 03h 22m 47s [S](!) | 05h 54m 33s [S]   | 04h 55m 22s [S]   | 05h 44m 45s [S]  
+ 7 | 7_TimeLLM        | Normal | -                 | -                 | 07h 30m 00s [C]   | -                
+ 7 | 7_TimeLLM        | Small  | 08m 17s [C]       | 06m 22s [C]       | 53m 01s [C]       | -                
+ 8 | 8_TimesFM25      | Normal | 07h 27m 17s [S]   | 03h 37m 09s [S]   | 02h 38m 09s [S]   | -                
+ 8 | 8_TimesFM25      | Small  | 08h 52m 53s [S]   | 08h 44m 02s [S]   | 53h 58m 20s [S]   | 16h 26m 14s [S]  
+ 9 | 9_Moirai10       | Normal | 06h 30m 15s [S]   | 02h 10m 39s [S]   | 09h 21m 30s [S]   | -                
+ 9 | 9_Moirai10       | Small  | 02h 12m 55s [S]   | 09m 09s [S]       | 05h 21m 01s [S]   | -                
+10 | 10_Moirai11      | Normal | 80h 26m 52s [S]   | 31h 55m 19s [S]   | -                 | -                
+10 | 10_Moirai11      | Small  | 09h 22m 22s [S]   | 04h 06m 09s [S]   | -                 | -                
+11 | 11_Moirai20      | Normal | 04h 39m 46s [S]   | 29h 45m 21s [S]   | 18h 06m 41s [S]   | 54h 22m 23s [S]  
+11 | 11_Moirai20      | Small  | 28m 11s [C](!)    | 05h 00m 41s [C]   | 02h 35m 06s [C]   | 01h 53m 29s [S]  
+12 | 12_TimerBase     | Normal | 45m 32s [S]       | 02h 21m 33s [S]   | 02h 17m 54s [S]   | -                
+12 | 12_TimerBase     | Small  | 04m 21s [S]       | 05m 28s [S]       | 21m 41s [S]       | -                
+13 | 13_LagLLama      | Normal | -                 | -                 | -                 | -                
+13 | 13_LagLLama      | Small  | 01h 55m 49s [S]   | 01s [S](!)        | -                 | -                
+14 | 14_Tirex         | Normal | -                 | -                 | -                 | -                
+14 | 14_Tirex         | Small  | 34h 02m 06s [S]   | 10h 51m 34s [S]   | 71h 25m 38s [C]   | 08h 52m 51s [S]  
+15 | 15_Kairos10      | Normal | 02h 36m 02s [S]   | 04h 15m 13s [S]   | 06h 31m 32s [S]   | -                
+15 | 15_Kairos10      | Small  | 03m 24s [C]       | 05m 56s [C]       | 22m 07s [C]       | -                
+16 | 16_Kairos23      | Normal | 02h 21m 17s [S]   | 03h 56m 29s [S]   | 05h 29m 17s [S]   | -                
+16 | 16_Kairos23      | Small  | 04m 07s [C]       | 08m 32s [C]       | 12m 07s [C]       | -                
+17 | 17_Kairos50      | Normal | 55m 22s [S]       | 02h 21m 29s [S]   | 01h 52m 02s [S]   | -                
+17 | 17_Kairos50      | Small  | 05m 15s [C]       | 13m 45s [C]       | 21m 57s [C]       | -                
+18 | 18_Sundial128    | Normal | 04h 56m 52s [C]   | 00s [C](!)        | 14h 22m 57s [C]   | -                
+18 | 18_Sundial128    | Small  | 24m 47s [C]       | 12m 09s [C]       | -                 | -                
+19 | 19_ChronosBolt9  | Normal | 01h 03m 01s [S]   | 02h 38m 11s [S]   | 02h 42m 58s [S]   | -                
+19 | 19_ChronosBolt9  | Small  | 16m 22s [C]       | 02h 17m 58s [C]   | 01h 53m 41s [C]   | -                
+20 | 20_ChronosBolt21 | Normal | 01h 38m 27s [S]   | 04h 23m 34s [S]   | 05h 12m 20s [S]   | -                
+20 | 20_ChronosBolt21 | Small  | 25m 32s [C]       | 04h 17m 09s [C]   | 04h 00m 59s [C]   | -                
+21 | 21_ChronosBolt43 | Normal | 03h 38m 49s [S]   | 09h 43m 17s [S]   | 10h 08m 48s [S]   | -                
+21 | 21_ChronosBolt43 | Small  | 56m 17s [C]       | 07h 18m 40s [C]   | 08h 29m 49s [C]   | -                
+22 | 22_Moment1       | Normal | 03h 29m 53s [C]   | 01h 01m 10s [C]   | -                 | -                
+22 | 22_Moment1       | Small  | -                 | -                 | -                 | -                
+24 | 24_TimesFM30     | Normal | 07h 27m 17s [S]   | 03h 37m 09s [S]   | 02h 38m 09s [S]   | -                
+24 | 24_TimesFM30     | Small  | 49m 38s [S]       | 16m 41s [S]       | 11m 12s [S]       | -                
+
+Legend: [S] = Remote Server (Drive S:), [C] = Local Machine (Drive C:), (!) = Incomplete / Aborted run, [-] = Missing / Not logged
